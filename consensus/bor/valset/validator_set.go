@@ -110,6 +110,36 @@ func (vals *ValidatorSet) IncrementProposerPriority(times int) {
 	vals.Proposer = proposer
 }
 
+// IncludeIds include the proper Id of each validator by getting the id from
+// validator queried on ValidatorSet contract
+func (vals *ValidatorSet) IncludeIds(valsWithId []*Validator) {
+	if vals.IsNilOrEmpty() {
+		log.Warn("Empty validator set")
+	}
+
+	addressToId := make(map[common.Address]uint64)
+
+	for _, val := range valsWithId {
+		addressToId[val.Address] = val.ID
+	}
+
+	for _, val := range vals.Validators {
+		val.ID = addressToId[val.Address]
+	}
+}
+
+// CheckEmptyId checks if any validator in the ValidatorSet has an empty ID (ID == 0).
+// Returns true if at least one validator has an empty ID.
+// Returns false if all validators have non-zero IDs or if the ValidatorSet is empty.
+func (vals *ValidatorSet) CheckEmptyId() bool {
+	for _, val := range vals.Validators {
+		if val.ID == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (vals *ValidatorSet) RescalePriorities(diffMax int64) {
 	if vals.IsNilOrEmpty() {
 		panic("empty validator set")
@@ -435,7 +465,7 @@ func verifyUpdates(updates []*Validator, vals *ValidatorSet) (updatedTotalVoting
 		_, val := vals.GetByAddress(address)
 
 		if val == nil {
-			// New validator, add its voting power the the total.
+			// New validator, add its voting power the total.
 			updatedTotalVotingPower += valUpdate.VotingPower
 			numNewValidators++
 		} else {
@@ -499,6 +529,7 @@ func (vals *ValidatorSet) applyUpdates(updates []*Validator) {
 		} else {
 			// Apply add or update.
 			merged[i] = updates[0]
+
 			if existing[0].Address == updates[0].Address {
 				// Validator is present in both, advance existing.
 				existing = existing[1:]
@@ -506,6 +537,7 @@ func (vals *ValidatorSet) applyUpdates(updates []*Validator) {
 
 			updates = updates[1:]
 		}
+
 		i++
 	}
 

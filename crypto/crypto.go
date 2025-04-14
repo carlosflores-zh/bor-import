@@ -26,9 +26,9 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"io/ioutil"
 	"math/big"
 	"os"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
@@ -36,7 +36,7 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-//SignatureLength indicates the byte length required to carry a signature with recovery id.
+// SignatureLength indicates the byte length required to carry a signature with recovery id.
 const SignatureLength = 64 + 1 // 64 bytes ECDSA signature + 1 byte recovery id
 
 // RecoveryIDOffset points to the byte offset within the signature that contains the recovery id.
@@ -46,11 +46,20 @@ const RecoveryIDOffset = 64
 const DigestLength = 32
 
 var (
-	secp256k1N, _  = new(big.Int).SetString("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 16)
+	secp256k1N     = S256().Params().N
 	secp256k1halfN = new(big.Int).Div(secp256k1N, big.NewInt(2))
 )
 
 var errInvalidPubkey = errors.New("invalid secp256k1 public key")
+
+// EllipticCurve contains curve operations.
+type EllipticCurve interface {
+	elliptic.Curve
+
+	// Point marshaling/unmarshaing.
+	Marshal(x, y *big.Int) []byte
+	Unmarshal(data []byte) (x, y *big.Int)
+}
 
 // KeccakState wraps sha3.state. In addition to the usual hash methods, it also supports
 // Read to get a variable amount of data from the hash state. Read is faster than Sum
@@ -60,9 +69,21 @@ type KeccakState interface {
 	Read([]byte) (int, error)
 }
 
+// hasherPool holds LegacyKeccak256 hashers for reuse.
+var hasherPool = sync.Pool{
+	New: func() interface{} { return sha3.NewLegacyKeccak256() },
+}
+
 // NewKeccakState creates a new KeccakState
 func NewKeccakState() KeccakState {
-	return sha3.NewLegacyKeccak256().(KeccakState)
+	return hasherPool.Get().(KeccakState)
+}
+
+// PutKeccakState puts the KeccakState back into the pool.
+// The state must not be used after calling this function.
+func PutKeccakState(kh KeccakState) {
+	kh.Reset()
+	hasherPool.Put(kh)
 }
 
 // HashData hashes the provided data using the KeccakState and returns a 32 byte hash
@@ -77,9 +98,13 @@ func HashData(kh KeccakState, data []byte) (h common.Hash) {
 func Keccak256(data ...[]byte) []byte {
 	b := make([]byte, 32)
 	d := NewKeccakState()
+	defer PutKeccakState(d)
+	d.Reset()
+
 	for _, b := range data {
 		d.Write(b)
 	}
+
 	d.Read(b)
 	return b
 }
@@ -88,9 +113,13 @@ func Keccak256(data ...[]byte) []byte {
 // converting it to an internal Hash data structure.
 func Keccak256Hash(data ...[]byte) (h common.Hash) {
 	d := NewKeccakState()
+	defer PutKeccakState(d)
+	d.Reset()
+
 	for _, b := range data {
 		d.Write(b)
 	}
+
 	d.Read(h[:])
 	return h
 }
@@ -101,6 +130,7 @@ func Keccak512(data ...[]byte) []byte {
 	for _, b := range data {
 		d.Write(b)
 	}
+
 	return d.Sum(nil)
 }
 
@@ -135,24 +165,27 @@ func ToECDSAUnsafe(d []byte) *ecdsa.PrivateKey {
 func toECDSA(d []byte, strict bool) (*ecdsa.PrivateKey, error) {
 	priv := new(ecdsa.PrivateKey)
 	priv.PublicKey.Curve = S256()
+
 	if strict && 8*len(d) != priv.Params().BitSize {
 		return nil, fmt.Errorf("invalid length, need %d bits", priv.Params().BitSize)
 	}
+
 	priv.D = new(big.Int).SetBytes(d)
 
 	// The priv.D must < N
 	if priv.D.Cmp(secp256k1N) >= 0 {
-		return nil, fmt.Errorf("invalid private key, >=N")
+		return nil, errors.New("invalid private key, >=N")
 	}
 	// The priv.D must not be zero or negative.
 	if priv.D.Sign() <= 0 {
-		return nil, fmt.Errorf("invalid private key, zero or negative")
+		return nil, errors.New("invalid private key, zero or negative")
 	}
 
-	priv.PublicKey.X, priv.PublicKey.Y = priv.PublicKey.Curve.ScalarBaseMult(d)
+	priv.PublicKey.X, priv.PublicKey.Y = S256().ScalarBaseMult(d)
 	if priv.PublicKey.X == nil {
 		return nil, errors.New("invalid private key")
 	}
+
 	return priv, nil
 }
 
@@ -161,15 +194,20 @@ func FromECDSA(priv *ecdsa.PrivateKey) []byte {
 	if priv == nil {
 		return nil
 	}
+
 	return math.PaddedBigBytes(priv.D, priv.Params().BitSize/8)
 }
 
 // UnmarshalPubkey converts bytes to a secp256k1 public key.
 func UnmarshalPubkey(pub []byte) (*ecdsa.PublicKey, error) {
-	x, y := elliptic.Unmarshal(S256(), pub)
+	x, y := S256().Unmarshal(pub)
 	if x == nil {
 		return nil, errInvalidPubkey
 	}
+	if !S256().IsOnCurve(x, y) {
+		return nil, errInvalidPubkey
+	}
+
 	return &ecdsa.PublicKey{Curve: S256(), X: x, Y: y}, nil
 }
 
@@ -177,7 +215,7 @@ func FromECDSAPub(pub *ecdsa.PublicKey) []byte {
 	if pub == nil || pub.X == nil || pub.Y == nil {
 		return nil
 	}
-	return elliptic.Marshal(S256(), pub.X, pub.Y)
+	return S256().Marshal(pub.X, pub.Y)
 }
 
 // HexToECDSA parses a secp256k1 private key.
@@ -188,6 +226,7 @@ func HexToECDSA(hexkey string) (*ecdsa.PrivateKey, error) {
 	} else if err != nil {
 		return nil, errors.New("invalid hex data for private key")
 	}
+
 	return ToECDSA(b)
 }
 
@@ -201,12 +240,14 @@ func LoadECDSA(file string) (*ecdsa.PrivateKey, error) {
 
 	r := bufio.NewReader(fd)
 	buf := make([]byte, 64)
+
 	n, err := readASCII(buf, r)
 	if err != nil {
 		return nil, err
 	} else if n != len(buf) {
-		return nil, fmt.Errorf("key file too short, want 64 hex characters")
+		return nil, errors.New("key file too short, want 64 hex characters")
 	}
+
 	if err := checkKeyFileEnd(r); err != nil {
 		return nil, err
 	}
@@ -219,6 +260,7 @@ func LoadECDSA(file string) (*ecdsa.PrivateKey, error) {
 func readASCII(buf []byte, r *bufio.Reader) (n int, err error) {
 	for ; n < len(buf); n++ {
 		buf[n], err = r.ReadByte()
+
 		switch {
 		case err == io.EOF || buf[n] < '!':
 			return n, nil
@@ -226,6 +268,7 @@ func readASCII(buf []byte, r *bufio.Reader) (n int, err error) {
 			return n, err
 		}
 	}
+
 	return n, nil
 }
 
@@ -233,6 +276,7 @@ func readASCII(buf []byte, r *bufio.Reader) (n int, err error) {
 func checkKeyFileEnd(r *bufio.Reader) error {
 	for i := 0; ; i++ {
 		b, err := r.ReadByte()
+
 		switch {
 		case err == io.EOF:
 			return nil
@@ -250,7 +294,7 @@ func checkKeyFileEnd(r *bufio.Reader) error {
 // restrictive permissions. The key data is saved hex-encoded.
 func SaveECDSA(file string, key *ecdsa.PrivateKey) error {
 	k := hex.EncodeToString(FromECDSA(key))
-	return ioutil.WriteFile(file, []byte(k), 0600)
+	return os.WriteFile(file, []byte(k), 0600)
 }
 
 // GenerateKey generates a new private key.
@@ -279,7 +323,5 @@ func PubkeyToAddress(p ecdsa.PublicKey) common.Address {
 }
 
 func zeroBytes(bytes []byte) {
-	for i := range bytes {
-		bytes[i] = 0
-	}
+	clear(bytes)
 }

@@ -1,22 +1,38 @@
-defaultStake: 10000
+devnetType: docker
+
 defaultFee: 2000
+defaultStake: 10000
+
 borChainId: 15001
 heimdallChainId: heimdall-15001
-contractsBranch: 2ed59de3641c407c64def1b40bcd090cb9cc048a
+
+borDockerBuildContext: '../../bor'
+heimdallDockerBuildContext: 'https://github.com/maticnetwork/heimdall.git#develop'
+
 genesisContractsBranch: master
-sprintSize:
-  - '64'
-blockNumber:
-  - '0'
+contractsRepo: https://github.com/0xPolygon/pos-contracts.git
+contractsBranch: anvil-pos
+
 blockTime:
   - '2'
-numOfValidators: 3
-numOfNonValidators: 0
-ethURL: http://ganache:9545
-ethHostUser: ubuntu
-devnetType: docker
-borDockerBuildContext: "../../bor"
-heimdallDockerBuildContext: "https://github.com/maticnetwork/heimdall.git#develop"
+blockNumber:
+  - '0'
+
+sprintSize:
+  - '64'
 sprintSizeBlockNumber:
   - '0'
-numOfArchiveNodes: 0
+
+numOfBorValidators: 3
+numOfBorSentries: 0
+numOfBorArchiveNodes: 0
+
+devnetBorFlags: config,config,config
+
+numOfErigonValidators: 0
+numOfErigonSentries: 0
+numOfErigonArchiveNodes: 0
+
+ethURL: http://anvil:9545
+ethHostUser: ubuntu
+mnemonic: 'clock radar mass judge dismiss just intact mind resemble fringe diary casino'

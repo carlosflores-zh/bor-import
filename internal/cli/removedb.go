@@ -27,7 +27,6 @@ const (
 	chaindataPath        string = "chaindata"
 	ancientPath          string = "ancient"
 	trieCacheJournalPath string = "triecache"
-	lightchaindataPath   string = "lightchaindata"
 )
 
 // MarkDown implements cli.MarkDown interface
@@ -102,14 +101,6 @@ func (c *RemoveDBCommand) Run(args []string) int {
 		log.Info("Full node ancient database missing", "path", path)
 	}
 
-	// Remove the light node database
-	path = nodeCfg.ResolvePath(lightchaindataPath)
-	if common.FileExist(path) {
-		confirmAndRemoveDB(c.UI, path, "light node database")
-	} else {
-		log.Info("Light node database missing", "path", path)
-	}
-
 	return 0
 }
 
@@ -136,6 +127,7 @@ func confirmAndRemoveDB(ui cli.Ui, database string, kind string) {
 					if !info.IsDir() {
 						return os.Remove(path)
 					}
+
 					return filepath.SkipDir
 				})
 

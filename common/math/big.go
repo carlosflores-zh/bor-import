@@ -48,7 +48,20 @@ type HexOrDecimal256 big.Int
 func NewHexOrDecimal256(x int64) *HexOrDecimal256 {
 	b := big.NewInt(x)
 	h := HexOrDecimal256(*b)
+
 	return &h
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+//
+// It is similar to UnmarshalText, but allows parsing real decimals too, not just
+// quoted decimal strings.
+func (i *HexOrDecimal256) UnmarshalJSON(input []byte) error {
+	if len(input) > 1 && input[0] == '"' {
+		input = input[1 : len(input)-1]
+	}
+
+	return i.UnmarshalText(input)
 }
 
 // UnmarshalText implements encoding.TextUnmarshaler.
@@ -57,7 +70,9 @@ func (i *HexOrDecimal256) UnmarshalText(input []byte) error {
 	if !ok {
 		return fmt.Errorf("invalid hex or decimal integer %q", input)
 	}
+
 	*i = HexOrDecimal256(*bigint)
+
 	return nil
 }
 
@@ -66,6 +81,7 @@ func (i *HexOrDecimal256) MarshalText() ([]byte, error) {
 	if i == nil {
 		return []byte("0x0"), nil
 	}
+
 	return []byte(fmt.Sprintf("%#x", (*big.Int)(i))), nil
 }
 
@@ -73,10 +89,11 @@ func (i *HexOrDecimal256) MarshalText() ([]byte, error) {
 // it however accepts either "0x"-prefixed (hex encoded) or non-prefixed (decimal)
 type Decimal256 big.Int
 
-// NewHexOrDecimal256 creates a new Decimal256
+// NewDecimal256 creates a new Decimal256
 func NewDecimal256(x int64) *Decimal256 {
 	b := big.NewInt(x)
 	d := Decimal256(*b)
+
 	return &d
 }
 
@@ -86,7 +103,9 @@ func (i *Decimal256) UnmarshalText(input []byte) error {
 	if !ok {
 		return fmt.Errorf("invalid hex or decimal integer %q", input)
 	}
+
 	*i = Decimal256(*bigint)
+
 	return nil
 }
 
@@ -100,6 +119,7 @@ func (i *Decimal256) String() string {
 	if i == nil {
 		return "0"
 	}
+
 	return fmt.Sprintf("%#d", (*big.Int)(i))
 }
 
@@ -109,16 +129,20 @@ func ParseBig256(s string) (*big.Int, bool) {
 	if s == "" {
 		return new(big.Int), true
 	}
+
 	var bigint *big.Int
+
 	var ok bool
 	if len(s) >= 2 && (s[:2] == "0x" || s[:2] == "0X") {
 		bigint, ok = new(big.Int).SetString(s[2:], 16)
 	} else {
 		bigint, ok = new(big.Int).SetString(s, 10)
 	}
+
 	if ok && bigint.BitLen() > 256 {
 		bigint, ok = nil, false
 	}
+
 	return bigint, ok
 }
 
@@ -128,6 +152,7 @@ func MustParseBig256(s string) *big.Int {
 	if !ok {
 		panic("invalid 256 bit integer: " + s)
 	}
+
 	return v
 }
 
@@ -172,6 +197,11 @@ func BigMinUint256(x, y *uint256.Int) *uint256.Int {
 	return x
 }
 
+// todo: @anshalshukla - check implementation correctness
+func BigIntToUint256Int(x *big.Int) *uint256.Int {
+	return new(uint256.Int).SetBytes(x.Bytes())
+}
+
 // FirstBitSet returns the index of the first 1 bit in v, counting from LSB.
 func FirstBitSet(v *big.Int) int {
 	for i := 0; i < v.BitLen(); i++ {
@@ -179,6 +209,7 @@ func FirstBitSet(v *big.Int) int {
 			return i
 		}
 	}
+
 	return v.BitLen()
 }
 
@@ -188,8 +219,10 @@ func PaddedBigBytes(bigint *big.Int, n int) []byte {
 	if bigint.BitLen()/8 >= n {
 		return bigint.Bytes()
 	}
+
 	ret := make([]byte, n)
 	ReadBits(bigint, ret)
+
 	return ret
 }
 
@@ -203,6 +236,7 @@ func bigEndianByteAt(bigint *big.Int, n int) byte {
 	if i >= len(words) {
 		return byte(0)
 	}
+
 	word := words[i]
 	// Offset of the byte
 	shift := 8 * uint(n%wordBytes)
@@ -218,6 +252,7 @@ func Byte(bigint *big.Int, padlength, n int) byte {
 	if n >= padlength {
 		return byte(0)
 	}
+
 	return bigEndianByteAt(bigint, padlength-1-n)
 }
 
@@ -234,7 +269,7 @@ func ReadBits(bigint *big.Int, buf []byte) {
 	}
 }
 
-// U256 encodes as a 256 bit two's complement number. This operation is destructive.
+// U256 encodes x as a 256 bit two's complement number. This operation is destructive.
 func U256(x *big.Int) *big.Int {
 	return x.And(x, tt256m1)
 }
@@ -256,6 +291,7 @@ func S256(x *big.Int) *big.Int {
 	if x.Cmp(tt255) < 0 {
 		return x
 	}
+
 	return new(big.Int).Sub(x, tt256)
 }
 
@@ -265,16 +301,18 @@ func S256(x *big.Int) *big.Int {
 //
 // Courtesy @karalabe and @chfast
 func Exp(base, exponent *big.Int) *big.Int {
+	copyBase := new(big.Int).Set(base)
 	result := big.NewInt(1)
 
 	for _, word := range exponent.Bits() {
 		for i := 0; i < wordBits; i++ {
 			if word&1 == 1 {
-				U256(result.Mul(result, base))
+				U256(result.Mul(result, copyBase))
 			}
-			U256(base.Mul(base, base))
+			U256(copyBase.Mul(copyBase, copyBase))
 			word >>= 1
 		}
 	}
+
 	return result
 }

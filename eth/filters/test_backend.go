@@ -9,6 +9,7 @@ import (
 	core "github.com/ethereum/go-ethereum/core"
 	bloombits "github.com/ethereum/go-ethereum/core/bloombits"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/state"
 	types "github.com/ethereum/go-ethereum/core/types"
 	ethdb "github.com/ethereum/go-ethereum/ethdb"
 	event "github.com/ethereum/go-ethereum/event"
@@ -38,7 +39,7 @@ func (b *TestBackend) GetBorBlockReceipt(ctx context.Context, hash common.Hash) 
 		return &types.Receipt{}, nil
 	}
 
-	receipt := rawdb.ReadBorReceipt(b.DB, hash, *number)
+	receipt := rawdb.ReadBorReceipt(b.DB, hash, *number, nil)
 	if receipt == nil {
 		return &types.Receipt{}, nil
 	}
@@ -97,19 +98,20 @@ func (b *TestBackend) HeaderByHash(ctx context.Context, hash common.Hash) (*type
 
 func (b *TestBackend) GetReceipts(ctx context.Context, hash common.Hash) (types.Receipts, error) {
 	if number := rawdb.ReadHeaderNumber(b.DB, hash); number != nil {
-		return rawdb.ReadReceipts(b.DB, hash, *number, params.TestChainConfig), nil
+		block := rawdb.ReadBlock(b.DB, hash, *number)
+		return rawdb.ReadReceipts(b.DB, hash, *number, block.Time(), params.TestChainConfig), nil
 	}
 
 	return nil, nil
 }
 
-func (b *TestBackend) GetLogs(ctx context.Context, hash common.Hash) ([][]*types.Log, error) {
-	number := rawdb.ReadHeaderNumber(b.DB, hash)
-	if number == nil {
-		return nil, nil
-	}
+func (b *TestBackend) GetVoteOnHash(ctx context.Context, starBlockNr uint64, endBlockNr uint64, hash string, milestoneId string) (bool, error) {
+	return false, nil
+}
 
-	receipts := rawdb.ReadReceipts(b.DB, hash, *number, params.TestChainConfig)
+func (b *TestBackend) GetLogs(ctx context.Context, hash common.Hash, number uint64) ([][]*types.Log, error) {
+	block := rawdb.ReadBlock(b.DB, hash, number)
+	receipts := rawdb.ReadReceipts(b.DB, hash, number, block.Time(), params.TestChainConfig)
 
 	logs := make([][]*types.Log, len(receipts))
 	for i, receipt := range receipts {
@@ -174,4 +176,16 @@ func (b *TestBackend) ServiceFilter(ctx context.Context, session *bloombits.Matc
 
 func (b *TestBackend) SubscribeStateSyncEvent(ch chan<- core.StateSyncEvent) event.Subscription {
 	return b.stateSyncFeed.Subscribe(ch)
+}
+
+func (b *TestBackend) ChainConfig() *params.ChainConfig { panic("not implemented") }
+
+func (b *TestBackend) CurrentHeader() *types.Header { panic("not implemented") }
+
+func (b *TestBackend) GetBody(context.Context, common.Hash, rpc.BlockNumber) (*types.Body, error) {
+	panic("not implemented")
+}
+
+func (b *TestBackend) Pending() (*types.Block, types.Receipts, *state.StateDB) {
+	panic("not implemented")
 }

@@ -17,6 +17,11 @@
 package state
 
 import (
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -39,11 +44,14 @@ func (al *accessList) Contains(address common.Address, slot common.Hash) (addres
 		// no such address (and hence zero slots)
 		return false, false
 	}
+
 	if idx == -1 {
 		// address yes, but no slots
 		return true, false
 	}
+
 	_, slotPresent = al.slots[idx][slot]
+
 	return true, slotPresent
 }
 
@@ -55,19 +63,14 @@ func newAccessList() *accessList {
 }
 
 // Copy creates an independent copy of an accessList.
-func (a *accessList) Copy() *accessList {
+func (al *accessList) Copy() *accessList {
 	cp := newAccessList()
-	for k, v := range a.addresses {
-		cp.addresses[k] = v
+	cp.addresses = maps.Clone(al.addresses)
+	cp.slots = make([]map[common.Hash]struct{}, len(al.slots))
+	for i, slotMap := range al.slots {
+		cp.slots[i] = maps.Clone(slotMap)
 	}
-	cp.slots = make([]map[common.Hash]struct{}, len(a.slots))
-	for i, slotMap := range a.slots {
-		newSlotmap := make(map[common.Hash]struct{}, len(slotMap))
-		for k := range slotMap {
-			newSlotmap[k] = struct{}{}
-		}
-		cp.slots[i] = newSlotmap
-	}
+
 	return cp
 }
 
@@ -77,7 +80,9 @@ func (al *accessList) AddAddress(address common.Address) bool {
 	if _, present := al.addresses[address]; present {
 		return false
 	}
+
 	al.addresses[address] = -1
+
 	return true
 }
 
@@ -93,6 +98,7 @@ func (al *accessList) AddSlot(address common.Address, slot common.Hash) (addrCha
 		al.addresses[address] = len(al.slots)
 		slotmap := map[common.Hash]struct{}{slot: {}}
 		al.slots = append(al.slots, slotmap)
+
 		return !addrPresent, true
 	}
 	// There is already an (address,slot) mapping
@@ -116,6 +122,7 @@ func (al *accessList) DeleteSlot(address common.Address, slot common.Hash) {
 	if !addrOk {
 		panic("reverting slot change, address not present in list")
 	}
+
 	slotmap := al.slots[idx]
 	delete(slotmap, slot)
 	// If that was the last (first) slot, remove it
@@ -133,4 +140,36 @@ func (al *accessList) DeleteSlot(address common.Address, slot common.Hash) {
 // operations.
 func (al *accessList) DeleteAddress(address common.Address) {
 	delete(al.addresses, address)
+}
+
+// Equal returns true if the two access lists are identical
+func (al *accessList) Equal(other *accessList) bool {
+	if !maps.Equal(al.addresses, other.addresses) {
+		return false
+	}
+	return slices.EqualFunc(al.slots, other.slots,
+		func(m map[common.Hash]struct{}, m2 map[common.Hash]struct{}) bool {
+			return maps.Equal(m, m2)
+		})
+}
+
+// PrettyPrint prints the contents of the access list in a human-readable form
+func (al *accessList) PrettyPrint() string {
+	out := new(strings.Builder)
+	var sortedAddrs []common.Address
+	for addr := range al.addresses {
+		sortedAddrs = append(sortedAddrs, addr)
+	}
+	slices.SortFunc(sortedAddrs, common.Address.Cmp)
+	for _, addr := range sortedAddrs {
+		idx := al.addresses[addr]
+		fmt.Fprintf(out, "%#x : (idx %d)\n", addr, idx)
+		if idx >= 0 {
+			slotmap := al.slots[idx]
+			for h := range slotmap {
+				fmt.Fprintf(out, "    %#x\n", h)
+			}
+		}
+	}
+	return out.String()
 }

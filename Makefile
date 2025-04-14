@@ -7,6 +7,7 @@
 .PHONY: geth-linux-arm geth-linux-arm-5 geth-linux-arm-6 geth-linux-arm-7 geth-linux-arm64
 .PHONY: geth-darwin geth-darwin-386 geth-darwin-amd64
 .PHONY: geth-windows geth-windows-386 geth-windows-amd64
+.PHONY: geth all test lint fmt clean devtools help
 
 GO ?= latest
 GOBIN = $(CURDIR)/build/bin
@@ -17,7 +18,7 @@ GIT_COMMIT ?= $(shell git rev-list -1 HEAD)
 
 PACKAGE = github.com/ethereum/go-ethereum
 GO_FLAGS += -buildvcs=false
-GO_LDFLAGS += -ldflags "-X ${PACKAGE}/params.GitCommit=${GIT_COMMIT} "
+GO_LDFLAGS += -ldflags "-X ${PACKAGE}/params.GitCommit=${GIT_COMMIT}"
 
 TESTALL = $$(go list ./... | grep -v go-ethereum/cmd/)
 TESTE2E = ./tests/...
@@ -25,7 +26,7 @@ GOTEST = GODEBUG=cgocheck=0 go test $(GO_FLAGS) $(GO_LDFLAGS) -p 1
 
 bor:
 	mkdir -p $(GOPATH)/bin/
-	go build -o $(GOBIN)/bor $(GO_LDFLAGS) ./cmd/cli/main.go 
+	go build -o $(GOBIN)/bor $(GO_LDFLAGS) ./cmd/cli/main.go
 	cp $(GOBIN)/bor $(GOPATH)/bin/
 	@echo "Done building."
 
@@ -33,14 +34,17 @@ protoc:
 	protoc --go_out=. --go-grpc_out=. ./internal/cli/server/proto/*.proto
 
 generate-mocks:
-	go generate mockgen -destination=./tests/bor/mocks/IHeimdallClient.go -package=mocks ./consensus/bor IHeimdallClient
-	go generate mockgen -destination=./eth/filters/IBackend.go -package=filters ./eth/filters Backend
+	go generate ./consensus/bor
+	go generate ./eth/filters
+	go generate ./ethdb
 
+#? geth: Build geth.
 geth:
 	$(GORUN) build/ci.go install ./cmd/geth
 	@echo "Done building."
 	@echo "Run \"$(GOBIN)/geth\" to launch geth."
 
+#? all: Build all packages and executables.
 all:
 	$(GORUN) build/ci.go install
 
@@ -57,7 +61,7 @@ ios:
 	@echo "Import \"$(GOBIN)/Geth.framework\" to use the library."
 
 test:
-	$(GOTEST) --timeout 5m -shuffle=on -cover -short -coverprofile=cover.out -covermode=atomic $(TESTALL)
+	$(GOTEST) --timeout 30m -cover -short -coverprofile=cover.out -covermode=atomic $(TESTALL)
 
 test-txpool-race:
 	$(GOTEST) -run=TestPoolMiningDataRaces --timeout 600m -race -v ./core/
@@ -65,8 +69,11 @@ test-txpool-race:
 test-race:
 	$(GOTEST) --timeout 15m -race -shuffle=on $(TESTALL)
 
+gocovmerge-deps:
+	$(GOBUILD) -o $(GOBIN)/gocovmerge github.com/wadey/gocovmerge
+
 test-integration:
-	$(GOTEST) --timeout 60m -tags integration $(TESTE2E)
+	$(GOTEST) --timeout 60m -cover -coverprofile=cover.out -covermode=atomic -tags integration $(TESTE2E)
 
 escape:
 	cd $(path) && go test -gcflags "-m -m" -run none -bench=BenchmarkJumpdest* -benchmem -memprofile mem.out
@@ -76,7 +83,12 @@ lint:
 
 lintci-deps:
 	rm -f ./build/bin/golangci-lint
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b ./build/bin v1.50.1
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b ./build/bin v1.63.4
+
+.PHONY: vulncheck
+
+vulncheck:
+	@go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 goimports:
 	goimports -local "$(PACKAGE)" -w .
@@ -84,13 +96,19 @@ goimports:
 docs:
 	$(GORUN) cmd/clidoc/main.go -d ./docs/cli
 
+#? fmt: Ensure consistent code formatting.
+fmt:
+	gofmt -s -w $(shell find . -name "*.go")
+
+#? clean: Clean go cache, built executables, and the auto generated folder.
 clean:
-	env GO111MODULE=on go clean -cache
+	go clean -cache
 	rm -fr build/_workspace/pkg/ $(GOBIN)/*
 
 # The devtools target installs tools required for 'go generate'.
 # You need to put $GOBIN (or $GOPATH/bin) in your PATH to use 'go generate'.
 
+#? devtools: Install recommended developer tools.
 devtools:
 	# Notice! If you adding new binary - add it also to tests/deps/fake.go file
 	$(GOBUILD) -o $(GOBIN)/stringer github.com/golang.org/x/tools/cmd/stringer
@@ -197,7 +215,7 @@ geth-windows-amd64:
 	@ls -ld $(GOBIN)/geth-windows-* | grep amd64
 
 PACKAGE_NAME          := github.com/maticnetwork/bor
-GOLANG_CROSS_VERSION  ?= v1.19.1
+GOLANG_CROSS_VERSION  ?= v1.22.1
 
 .PHONY: release-dry-run
 release-dry-run:
@@ -212,7 +230,7 @@ release-dry-run:
 		-v `pwd`:/go/src/$(PACKAGE_NAME) \
 		-w /go/src/$(PACKAGE_NAME) \
 		goreleaser/goreleaser-cross:${GOLANG_CROSS_VERSION} \
-		--rm-dist --skip-validate --skip-publish
+		--clean --skip-validate --skip-publish
 
 .PHONY: release
 release:
@@ -229,4 +247,4 @@ release:
 		-v `pwd`:/go/src/$(PACKAGE_NAME) \
 		-w /go/src/$(PACKAGE_NAME) \
 		goreleaser/goreleaser-cross:${GOLANG_CROSS_VERSION} \
-		--rm-dist --skip-validate
+		--clean --skip-validate

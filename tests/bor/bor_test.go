@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"math/big"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/bor"
 	"github.com/ethereum/go-ethereum/consensus/bor/clerk"
 	"github.com/ethereum/go-ethereum/consensus/bor/heimdall/checkpoint"
+	"github.com/ethereum/go-ethereum/consensus/bor/heimdall/milestone"
 	"github.com/ethereum/go-ethereum/consensus/bor/valset"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core"
@@ -39,6 +41,7 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/tests/bor/mocks"
+	"github.com/ethereum/go-ethereum/triedb"
 )
 
 var (
@@ -50,7 +53,7 @@ var (
 
 func TestValidatorWentOffline(t *testing.T) {
 
-	log.Root().SetHandler(log.LvlFilterHandler(log.LvlInfo, log.StreamHandler(os.Stderr, log.TerminalFormat(true))))
+	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelInfo, true)))
 	fdlimit.Raise(2048)
 
 	// Generate a batch of accounts to seal and fund with
@@ -92,7 +95,7 @@ func TestValidatorWentOffline(t *testing.T) {
 	// Iterate over all the nodes and start mining
 	time.Sleep(3 * time.Second)
 	for _, node := range nodes {
-		if err := node.StartMining(1); err != nil {
+		if err := node.StartMining(); err != nil {
 			panic(err)
 		}
 	}
@@ -224,12 +227,12 @@ func TestForkWithBlockTime(t *testing.T) {
 		{
 			name: "No fork after 2 sprints with producer delay = max block time",
 			sprint: map[string]uint64{
-				"0": 128,
+				"0": 16,
 			},
 			blockTime: map[string]uint64{
-				"0":   5,
-				"128": 2,
-				"256": 8,
+				"0":  5,
+				"16": 2,
+				"32": 8,
 			},
 			change: 2,
 			producerDelay: map[string]uint64{
@@ -240,11 +243,11 @@ func TestForkWithBlockTime(t *testing.T) {
 		{
 			name: "No Fork after 1 sprint producer delay = max block time",
 			sprint: map[string]uint64{
-				"0": 64,
+				"0": 16,
 			},
 			blockTime: map[string]uint64{
 				"0":  5,
-				"64": 2,
+				"16": 2,
 			},
 			change: 1,
 			producerDelay: map[string]uint64{
@@ -269,17 +272,20 @@ func TestForkWithBlockTime(t *testing.T) {
 		},
 	}
 
+	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelInfo, true)))
+	fdlimit.Raise(2048)
+
 	// Create an Ethash network based off of the Ropsten config
 	// Generate a batch of accounts to seal and fund with
 	faucets := make([]*ecdsa.PrivateKey, 128)
 	for i := 0; i < len(faucets); i++ {
 		faucets[i], _ = crypto.GenerateKey()
 	}
-	genesis := InitGenesis(t, faucets, "./testdata/genesis_2val.json", 8)
 
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-
+			t.Parallel()
+			genesis := InitGenesis(t, faucets, "./testdata/genesis_2val.json", 8)
 			genesis.Config.Bor.Sprint = test.sprint
 			genesis.Config.Bor.Period = test.blockTime
 			genesis.Config.Bor.BackupMultiplier = test.blockTime
@@ -295,8 +301,8 @@ func TestForkWithBlockTime(t *testing.T) {
 
 			// Iterate over all the nodes and start mining
 			for _, node := range nodes {
-				if err := node.StartMining(1); err != nil {
-					t.Fatal("Error occured while starting miner", "node", node, "error", err)
+				if err := node.StartMining(); err != nil {
+					t.Fatal("Error occurred while starting miner", "node", node, "error", err)
 				}
 			}
 			var wg sync.WaitGroup
@@ -311,6 +317,7 @@ func TestForkWithBlockTime(t *testing.T) {
 					defer wg.Done()
 
 					for range ticker.C {
+						log.Info("Fetching header", "node", i, "sprint", test.sprint["0"], "change", test.change, "number", test.sprint["0"]*test.change+10)
 						blockHeaders[i] = nodes[i].BlockChain().GetHeaderByNumber(test.sprint["0"]*test.change + 10)
 						if blockHeaders[i] != nil {
 							break
@@ -330,22 +337,22 @@ func TestForkWithBlockTime(t *testing.T) {
 
 			author0, err := nodes[0].Engine().Author(blockHeaderVal0)
 			if err != nil {
-				t.Error("Error occured while fetching author", "err", err)
+				t.Error("Error occurred while fetching author", "err", err)
 			}
 			author1, err := nodes[1].Engine().Author(blockHeaderVal1)
 			if err != nil {
-				t.Error("Error occured while fetching author", "err", err)
+				t.Error("Error occurred while fetching author", "err", err)
 			}
 			assert.Equal(t, author0, author1)
 
 			// After the end of sprint
 			author2, err := nodes[0].Engine().Author(blockHeaders[0])
 			if err != nil {
-				t.Error("Error occured while fetching author", "err", err)
+				t.Error("Error occurred while fetching author", "err", err)
 			}
 			author3, err := nodes[1].Engine().Author(blockHeaders[1])
 			if err != nil {
-				t.Error("Error occured while fetching author", "err", err)
+				t.Error("Error occurred while fetching author", "err", err)
 			}
 
 			if test.forkExpected {
@@ -364,38 +371,59 @@ func TestForkWithBlockTime(t *testing.T) {
 }
 
 func TestInsertingSpanSizeBlocks(t *testing.T) {
+	t.Parallel()
+	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelInfo, true)))
+	fdlimit.Raise(2048)
+
 	init := buildEthereumInstance(t, rawdb.NewMemoryDatabase())
 	chain := init.ethereum.BlockChain()
 	engine := init.ethereum.Engine()
 	_bor := engine.(*bor.Bor)
 
-	defer _bor.Close()
-
 	_, currentSpan := loadSpanFromFile(t)
 
 	h, ctrl := getMockedHeimdallClient(t, currentSpan)
-	defer ctrl.Finish()
+	defer func() {
+		_bor.Close()
+		ctrl.Finish()
+	}()
 
 	h.EXPECT().Close().AnyTimes()
+
 	h.EXPECT().FetchCheckpoint(gomock.Any(), int64(-1)).Return(&checkpoint.Checkpoint{
 		Proposer:   currentSpan.SelectedProducers[0].Address,
 		StartBlock: big.NewInt(0),
 		EndBlock:   big.NewInt(int64(spanSize)),
 	}, nil).AnyTimes()
 
+	h.EXPECT().FetchMilestone(gomock.Any()).Return(&milestone.Milestone{
+		Proposer:   currentSpan.SelectedProducers[0].Address,
+		StartBlock: big.NewInt(0),
+		EndBlock:   big.NewInt(int64(spanSize)),
+	}, nil).AnyTimes()
+
+	h.EXPECT().FetchLastNoAckMilestone(gomock.Any()).Return("", nil).AnyTimes()
+
+	h.EXPECT().FetchNoAckMilestone(gomock.Any(), string("test")).Return(nil).AnyTimes()
+
 	_bor.SetHeimdallClient(h)
 
-	db := init.ethereum.ChainDb()
-	block := init.genesis.ToBlock(db)
+	block := init.genesis.ToBlock()
 	// to := int64(block.Header().Time)
 
 	currentValidators := []*valset.Validator{valset.NewValidator(addr, 10)}
+
+	spanner := getMockedSpanner(t, currentValidators)
+	_bor.SetSpanner(spanner)
 
 	// Insert sprintSize # of blocks so that span is fetched at the start of a new sprint
 	for i := uint64(1); i <= spanSize; i++ {
 		block = buildNextBlock(t, _bor, chain, block, nil, init.genesis.Config.Bor, nil, currentValidators)
 		insertNewBlock(t, chain, block)
 	}
+
+	spanner = getMockedSpanner(t, currentSpan.ValidatorSet.Validators)
+	_bor.SetSpanner(spanner)
 
 	validators, err := _bor.GetCurrentValidators(context.Background(), block.Hash(), spanSize) // check validator set at the first block of new span
 	if err != nil {
@@ -410,6 +438,10 @@ func TestInsertingSpanSizeBlocks(t *testing.T) {
 }
 
 func TestFetchStateSyncEvents(t *testing.T) {
+	t.Parallel()
+	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelInfo, true)))
+	fdlimit.Raise(2048)
+
 	init := buildEthereumInstance(t, rawdb.NewMemoryDatabase())
 	chain := init.ethereum.BlockChain()
 	engine := init.ethereum.Engine()
@@ -418,13 +450,15 @@ func TestFetchStateSyncEvents(t *testing.T) {
 	defer _bor.Close()
 
 	// A. Insert blocks for 0th sprint
-	db := init.ethereum.ChainDb()
-	block := init.genesis.ToBlock(db)
+	block := init.genesis.ToBlock()
 
 	// B.1 Mock /bor/span/1
 	res, _ := loadSpanFromFile(t)
 
 	currentValidators := []*valset.Validator{valset.NewValidator(addr, 10)}
+
+	spanner := getMockedSpanner(t, currentValidators)
+	_bor.SetSpanner(spanner)
 
 	// Insert sprintSize # of blocks so that span is fetched at the start of a new sprint
 	for i := uint64(1); i < sprintSize; i++ {
@@ -442,7 +476,16 @@ func TestFetchStateSyncEvents(t *testing.T) {
 
 	h := mocks.NewMockIHeimdallClient(ctrl)
 	h.EXPECT().Close().AnyTimes()
+
 	h.EXPECT().Span(gomock.Any(), uint64(1)).Return(&res.Result, nil).AnyTimes()
+
+	h.EXPECT().FetchCheckpoint(gomock.Any(), int64(-1)).Return(&checkpoint.Checkpoint{}, nil).AnyTimes()
+
+	h.EXPECT().FetchMilestone(gomock.Any()).Return(&milestone.Milestone{}, nil).AnyTimes()
+
+	h.EXPECT().FetchLastNoAckMilestone(gomock.Any()).Return("", nil).AnyTimes()
+
+	h.EXPECT().FetchNoAckMilestone(gomock.Any(), string("test")).Return(nil).AnyTimes()
 
 	// B.2 Mock State Sync events
 	fromID := uint64(1)
@@ -458,10 +501,26 @@ func TestFetchStateSyncEvents(t *testing.T) {
 	_bor.SetHeimdallClient(h)
 
 	block = buildNextBlock(t, _bor, chain, block, nil, init.genesis.Config.Bor, nil, res.Result.ValidatorSet.Validators)
+
+	// Validate the state sync transactions set by consensus
+	validateStateSyncEvents(t, eventRecords, chain.GetStateSync())
+
 	insertNewBlock(t, chain, block)
 }
 
+func validateStateSyncEvents(t *testing.T, expected []*clerk.EventRecordWithTime, got []*types.StateSyncData) {
+	require.Equal(t, len(expected), len(got), "number of state sync events should be equal")
+
+	for i := 0; i < len(expected); i++ {
+		require.Equal(t, expected[i].ID, got[i].ID, fmt.Sprintf("state sync ids should be equal - index: %d, expected: %d, got: %d", i, expected[i].ID, got[i].ID))
+	}
+}
+
 func TestFetchStateSyncEvents_2(t *testing.T) {
+	t.Parallel()
+	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelInfo, true)))
+	fdlimit.Raise(2048)
+
 	init := buildEthereumInstance(t, rawdb.NewMemoryDatabase())
 	chain := init.ethereum.BlockChain()
 	engine := init.ethereum.Engine()
@@ -480,7 +539,16 @@ func TestFetchStateSyncEvents_2(t *testing.T) {
 
 	h := mocks.NewMockIHeimdallClient(ctrl)
 	h.EXPECT().Close().AnyTimes()
+
 	h.EXPECT().Span(gomock.Any(), uint64(1)).Return(&res.Result, nil).AnyTimes()
+
+	h.EXPECT().FetchCheckpoint(gomock.Any(), int64(-1)).Return(&checkpoint.Checkpoint{}, nil).AnyTimes()
+
+	h.EXPECT().FetchMilestone(gomock.Any()).Return(&milestone.Milestone{}, nil).AnyTimes()
+
+	h.EXPECT().FetchLastNoAckMilestone(gomock.Any()).Return("", nil).AnyTimes()
+
+	h.EXPECT().FetchNoAckMilestone(gomock.Any(), string("test")).Return(nil).AnyTimes()
 
 	// Mock State Sync events
 	// at # sprintSize, events are fetched for [fromID, (block-sprint).Time)
@@ -503,8 +571,7 @@ func TestFetchStateSyncEvents_2(t *testing.T) {
 	_bor.SetHeimdallClient(h)
 
 	// Insert blocks for 0th sprint
-	db := init.ethereum.ChainDb()
-	block := init.genesis.ToBlock(db)
+	block := init.genesis.ToBlock()
 
 	var currentValidators []*valset.Validator
 
@@ -515,11 +582,14 @@ func TestFetchStateSyncEvents_2(t *testing.T) {
 			currentValidators = []*valset.Validator{valset.NewValidator(addr, 10)}
 		}
 
+		spanner := getMockedSpanner(t, currentValidators)
+		_bor.SetSpanner(spanner)
+
 		block = buildNextBlock(t, _bor, chain, block, nil, init.genesis.Config.Bor, nil, currentValidators)
 		insertNewBlock(t, chain, block)
 	}
 
-	lastStateID, _ := _bor.GenesisContractsClient.LastStateId(sprintSize)
+	lastStateID, _ := _bor.GenesisContractsClient.LastStateId(nil, sprintSize, block.Hash())
 
 	// state 6 was not written
 	require.Equal(t, uint64(4), lastStateID.Uint64())
@@ -541,15 +611,22 @@ func TestFetchStateSyncEvents_2(t *testing.T) {
 			currentValidators = []*valset.Validator{valset.NewValidator(addr, 10)}
 		}
 
+		spanner := getMockedSpanner(t, currentValidators)
+		_bor.SetSpanner(spanner)
+
 		block = buildNextBlock(t, _bor, chain, block, nil, init.genesis.Config.Bor, nil, res.Result.ValidatorSet.Validators)
 		insertNewBlock(t, chain, block)
 	}
 
-	lastStateID, _ = _bor.GenesisContractsClient.LastStateId(spanSize)
+	lastStateID, _ = _bor.GenesisContractsClient.LastStateId(nil, spanSize, block.Hash())
 	require.Equal(t, uint64(6), lastStateID.Uint64())
 }
 
 func TestOutOfTurnSigning(t *testing.T) {
+	t.Parallel()
+	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelInfo, true)))
+	fdlimit.Raise(2048)
+
 	init := buildEthereumInstance(t, rawdb.NewMemoryDatabase())
 	chain := init.ethereum.BlockChain()
 	engine := init.ethereum.Engine()
@@ -567,10 +644,20 @@ func TestOutOfTurnSigning(t *testing.T) {
 
 	h.EXPECT().Close().AnyTimes()
 
+	h.EXPECT().FetchCheckpoint(gomock.Any(), int64(-1)).Return(&checkpoint.Checkpoint{}, nil).AnyTimes()
+
+	h.EXPECT().FetchMilestone(gomock.Any()).Return(&milestone.Milestone{}, nil).AnyTimes()
+
+	h.EXPECT().FetchLastNoAckMilestone(gomock.Any()).Return("", nil).AnyTimes()
+
+	h.EXPECT().FetchNoAckMilestone(gomock.Any(), string("test")).Return(nil).AnyTimes()
+
+	spanner := getMockedSpanner(t, heimdallSpan.ValidatorSet.Validators)
+	_bor.SetSpanner(spanner)
+
 	_bor.SetHeimdallClient(h)
 
-	db := init.ethereum.ChainDb()
-	block := init.genesis.ToBlock(db)
+	block := init.genesis.ToBlock()
 
 	setDifficulty := func(header *types.Header) {
 		if IsSprintStart(header.Number.Uint64()) {
@@ -634,6 +721,9 @@ func TestOutOfTurnSigning(t *testing.T) {
 }
 
 func TestSignerNotFound(t *testing.T) {
+	t.Parallel()
+	log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelInfo, true)))
+	fdlimit.Raise(2048)
 	init := buildEthereumInstance(t, rawdb.NewMemoryDatabase())
 	chain := init.ethereum.BlockChain()
 	engine := init.ethereum.Engine()
@@ -647,11 +737,17 @@ func TestSignerNotFound(t *testing.T) {
 	defer ctrl.Finish()
 
 	h.EXPECT().Close().AnyTimes()
+	h.EXPECT().FetchCheckpoint(gomock.Any(), int64(-1)).Return(&checkpoint.Checkpoint{}, nil).AnyTimes()
+
+	h.EXPECT().FetchMilestone(gomock.Any()).Return(&milestone.Milestone{}, nil).AnyTimes()
+
+	h.EXPECT().FetchLastNoAckMilestone(gomock.Any()).Return("", nil).AnyTimes()
+
+	h.EXPECT().FetchNoAckMilestone(gomock.Any(), string("test")).Return(nil).AnyTimes()
 
 	_bor.SetHeimdallClient(h)
 
-	db := init.ethereum.ChainDb()
-	block := init.genesis.ToBlock(db)
+	block := init.genesis.ToBlock()
 
 	// random signer account that is not a part of the validator set
 	const signer = "3714d99058cd64541433d59c6b391555b2fd9b54629c2b717a6c9c00d1127b6b"
@@ -699,7 +795,7 @@ func TestEIP1559Transition(t *testing.T) {
 		funds = new(big.Int).Mul(common.Big1, big.NewInt(params.Ether))
 		gspec = &core.Genesis{
 			Config: params.BorUnittestChainConfig,
-			Alloc: core.GenesisAlloc{
+			Alloc: types.GenesisAlloc{
 				addr1: {Balance: funds},
 				addr2: {Balance: funds},
 				addr3: {Balance: funds},
@@ -720,7 +816,7 @@ func TestEIP1559Transition(t *testing.T) {
 
 	gspec.Config.BerlinBlock = common.Big0
 	gspec.Config.LondonBlock = common.Big0
-	genesis := gspec.MustCommit(db)
+	genesis := gspec.MustCommit(db, triedb.NewDatabase(db, triedb.HashDefaults))
 	signer := types.LatestSigner(gspec.Config)
 
 	blocks, _ := core.GenerateChain(gspec.Config, genesis, engine, db, 1, func(i int, b *core.BlockGen) {
@@ -748,9 +844,9 @@ func TestEIP1559Transition(t *testing.T) {
 	})
 
 	diskdb := rawdb.NewMemoryDatabase()
-	gspec.MustCommit(diskdb)
+	gspec.MustCommit(diskdb, triedb.NewDatabase(diskdb, triedb.HashDefaults))
 
-	chain, err := core.NewBlockChain(diskdb, nil, gspec.Config, engine, vm.Config{}, nil, nil, nil)
+	chain, err := core.NewBlockChain(diskdb, nil, gspec, nil, engine, vm.Config{}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to create tester chain: %v", err)
 	}
@@ -770,17 +866,17 @@ func TestEIP1559Transition(t *testing.T) {
 	state, _ := chain.State()
 
 	// 3: Ensure that miner received only the tx's tip.
-	actual := state.GetBalance(block.Coinbase())
+	actual := state.GetBalance(block.Coinbase()).ToBig()
 	expected := new(big.Int).Add(
 		new(big.Int).SetUint64(block.GasUsed()*block.Transactions()[0].GasTipCap().Uint64()),
-		ethash.ConstantinopleBlockReward,
+		ethash.ConstantinopleBlockReward.ToBig(),
 	)
 	if actual.Cmp(expected) != 0 {
 		t.Fatalf("miner balance incorrect: expected %d, got %d", expected, actual)
 	}
 
 	// check burnt contract balance
-	actual = state.GetBalance(common.HexToAddress(params.BorUnittestChainConfig.Bor.CalculateBurntContract(block.NumberU64())))
+	actual = state.GetBalance(common.HexToAddress(params.BorUnittestChainConfig.Bor.CalculateBurntContract(block.NumberU64()))).ToBig()
 	expected = new(big.Int).Mul(new(big.Int).SetUint64(block.GasUsed()), block.BaseFee())
 	burntContractBalance := expected
 	if actual.Cmp(expected) != 0 {
@@ -788,7 +884,7 @@ func TestEIP1559Transition(t *testing.T) {
 	}
 
 	// 4: Ensure the tx sender paid for the gasUsed * (tip + block baseFee).
-	actual = new(big.Int).Sub(funds, state.GetBalance(addr1))
+	actual = new(big.Int).Sub(funds, state.GetBalance(addr1).ToBig())
 	expected = new(big.Int).SetUint64(block.GasUsed() * (block.Transactions()[0].GasTipCap().Uint64() + block.BaseFee().Uint64()))
 	if actual.Cmp(expected) != 0 {
 		t.Fatalf("sender balance incorrect: expected %d, got %d", expected, actual)
@@ -818,17 +914,17 @@ func TestEIP1559Transition(t *testing.T) {
 	effectiveTip := block.Transactions()[0].GasTipCap().Uint64() - block.BaseFee().Uint64()
 
 	// 6+5: Ensure that miner received only the tx's effective tip.
-	actual = state.GetBalance(block.Coinbase())
+	actual = state.GetBalance(block.Coinbase()).ToBig()
 	expected = new(big.Int).Add(
 		new(big.Int).SetUint64(block.GasUsed()*effectiveTip),
-		ethash.ConstantinopleBlockReward,
+		ethash.ConstantinopleBlockReward.ToBig(),
 	)
 	if actual.Cmp(expected) != 0 {
 		t.Fatalf("miner balance incorrect: expected %d, got %d", expected, actual)
 	}
 
 	// check burnt contract balance
-	actual = state.GetBalance(common.HexToAddress(params.BorUnittestChainConfig.Bor.CalculateBurntContract(block.NumberU64())))
+	actual = state.GetBalance(common.HexToAddress(params.BorUnittestChainConfig.Bor.CalculateBurntContract(block.NumberU64()))).ToBig()
 	expected = new(big.Int).Add(burntContractBalance, new(big.Int).Mul(new(big.Int).SetUint64(block.GasUsed()), block.BaseFee()))
 	burntContractBalance = expected
 	if actual.Cmp(expected) != 0 {
@@ -836,7 +932,7 @@ func TestEIP1559Transition(t *testing.T) {
 	}
 
 	// 4: Ensure the tx sender paid for the gasUsed * (effectiveTip + block baseFee).
-	actual = new(big.Int).Sub(funds, state.GetBalance(addr2))
+	actual = new(big.Int).Sub(funds, state.GetBalance(addr2).ToBig())
 	expected = new(big.Int).SetUint64(block.GasUsed() * (effectiveTip + block.BaseFee().Uint64()))
 	if actual.Cmp(expected) != 0 {
 		t.Fatalf("sender balance incorrect: expected %d, got %d", expected, actual)
@@ -886,7 +982,7 @@ func TestEIP1559Transition(t *testing.T) {
 	state, _ = chain.State()
 
 	// check burnt contract balance
-	actual = state.GetBalance(common.HexToAddress(params.BorUnittestChainConfig.Bor.CalculateBurntContract(block.NumberU64())))
+	actual = state.GetBalance(common.HexToAddress(params.BorUnittestChainConfig.Bor.CalculateBurntContract(block.NumberU64()))).ToBig()
 	burntAmount := new(big.Int).Mul(
 		block.BaseFee(),
 		big.NewInt(int64(block.GasUsed())),
@@ -894,6 +990,292 @@ func TestEIP1559Transition(t *testing.T) {
 	expected = new(big.Int).Add(burntContractBalance, burntAmount)
 	if actual.Cmp(expected) != 0 {
 		t.Fatalf("burnt contract balance incorrect: expected %d, got %d", expected, actual)
+	}
+}
+
+func TestBurnContract(t *testing.T) {
+	t.Parallel()
+	var (
+		aa = common.HexToAddress("0x000000000000000000000000000000000000aaaa")
+
+		// Generate a canonical chain to act as the main dataset
+		db     = rawdb.NewMemoryDatabase()
+		engine = ethash.NewFaker()
+
+		// A sender who makes transactions, has some funds
+		key1, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+		key2, _ = crypto.HexToECDSA("8a1f9a8f95be41cd7ccb6168179afb4504aefe388d1e14474d32c45c72ce7b7a")
+		key3, _ = crypto.HexToECDSA("225171aed3793cba1c029832886d69785b7e77a54a44211226b447aa2d16b058")
+
+		addr1 = crypto.PubkeyToAddress(key1.PublicKey)
+		addr2 = crypto.PubkeyToAddress(key2.PublicKey)
+		addr3 = crypto.PubkeyToAddress(key3.PublicKey)
+		funds = new(big.Int).Mul(common.Big1, big.NewInt(params.Ether))
+		gspec = &core.Genesis{
+			Config: params.BorUnittestChainConfig,
+			Alloc: types.GenesisAlloc{
+				addr1: {Balance: funds},
+				addr2: {Balance: funds},
+				addr3: {Balance: funds},
+				// The address 0xAAAA sloads 0x00 and 0x01
+				aa: {
+					Code: []byte{
+						byte(vm.PC),
+						byte(vm.PC),
+						byte(vm.SLOAD),
+						byte(vm.SLOAD),
+					},
+					Nonce:   0,
+					Balance: big.NewInt(0),
+				},
+			},
+		}
+	)
+
+	gspec.Config.BerlinBlock = common.Big0
+	gspec.Config.LondonBlock = common.Big0
+	gspec.Config.Bor.BurntContract = map[string]string{
+		"0": "0x000000000000000000000000000000000000aaab",
+		"1": "0x000000000000000000000000000000000000aaac",
+		"2": "0x000000000000000000000000000000000000aaad",
+		"3": "0x000000000000000000000000000000000000aaae",
+	}
+	genesis := gspec.MustCommit(db, triedb.NewDatabase(db, triedb.HashDefaults))
+	signer := types.LatestSigner(gspec.Config)
+
+	blocks, _ := core.GenerateChain(gspec.Config, genesis, engine, db, 1, func(i int, b *core.BlockGen) {
+		b.SetCoinbase(common.Address{1})
+		// One transaction to 0xAAAA
+		accesses := types.AccessList{types.AccessTuple{
+			Address:     aa,
+			StorageKeys: []common.Hash{{0}},
+		}}
+
+		txdata := &types.DynamicFeeTx{
+			ChainID:    gspec.Config.ChainID,
+			Nonce:      0,
+			To:         &aa,
+			Gas:        30000,
+			GasFeeCap:  newGwei(5),
+			GasTipCap:  big.NewInt(2),
+			AccessList: accesses,
+			Data:       []byte{},
+		}
+		tx := types.NewTx(txdata)
+		tx, _ = types.SignTx(tx, signer, key1)
+
+		b.AddTx(tx)
+	})
+
+	diskdb := rawdb.NewMemoryDatabase()
+	gspec.MustCommit(diskdb, triedb.NewDatabase(diskdb, triedb.HashDefaults))
+
+	chain, err := core.NewBlockChain(diskdb, nil, gspec, nil, engine, vm.Config{}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("failed to create tester chain: %v", err)
+	}
+	if n, err := chain.InsertChain(blocks); err != nil {
+		t.Fatalf("block %d: failed to insert into chain: %v", n, err)
+	}
+
+	block := chain.GetBlockByNumber(1)
+
+	// 1+2: Ensure EIP-1559 access lists are accounted for via gas usage.
+	expectedGas := params.TxGas + params.TxAccessListAddressGas + params.TxAccessListStorageKeyGas +
+		vm.GasQuickStep*2 + params.WarmStorageReadCostEIP2929 + params.ColdSloadCostEIP2929
+	if block.GasUsed() != expectedGas {
+		t.Fatalf("incorrect amount of gas spent: expected %d, got %d", expectedGas, block.GasUsed())
+	}
+
+	state, _ := chain.State()
+
+	// 3: Ensure that miner received only the tx's tip.
+	actual := state.GetBalance(block.Coinbase()).ToBig()
+	expected := new(big.Int).Add(
+		new(big.Int).SetUint64(block.GasUsed()*block.Transactions()[0].GasTipCap().Uint64()),
+		ethash.ConstantinopleBlockReward.ToBig(),
+	)
+	if actual.Cmp(expected) != 0 {
+		t.Fatalf("miner balance incorrect: expected %d, got %d", expected, actual)
+	}
+
+	// check burnt contract balance
+	actual = state.GetBalance(common.HexToAddress(gspec.Config.Bor.CalculateBurntContract(block.NumberU64()))).ToBig()
+	expected = new(big.Int).Mul(new(big.Int).SetUint64(block.GasUsed()), block.BaseFee())
+	if actual.Cmp(expected) != 0 {
+		t.Fatalf("burnt contract balance incorrect: expected %d, got %d", expected, actual)
+	}
+
+	// 4: Ensure the tx sender paid for the gasUsed * (tip + block baseFee).
+	actual = new(big.Int).Sub(funds, state.GetBalance(addr1).ToBig())
+	expected = new(big.Int).SetUint64(block.GasUsed() * (block.Transactions()[0].GasTipCap().Uint64() + block.BaseFee().Uint64()))
+	if actual.Cmp(expected) != 0 {
+		t.Fatalf("sender balance incorrect: expected %d, got %d", expected, actual)
+	}
+
+	blocks, _ = core.GenerateChain(gspec.Config, block, engine, db, 1, func(i int, b *core.BlockGen) {
+		b.SetCoinbase(common.Address{2})
+
+		txdata := &types.LegacyTx{
+			Nonce:    0,
+			To:       &aa,
+			Gas:      30000,
+			GasPrice: newGwei(5),
+		}
+		tx := types.NewTx(txdata)
+		tx, _ = types.SignTx(tx, signer, key2)
+
+		b.AddTx(tx)
+	})
+
+	if n, err := chain.InsertChain(blocks); err != nil {
+		t.Fatalf("block %d: failed to insert into chain: %v", n, err)
+	}
+
+	block = chain.GetBlockByNumber(2)
+	state, _ = chain.State()
+	effectiveTip := block.Transactions()[0].GasTipCap().Uint64() - block.BaseFee().Uint64()
+
+	// 6+5: Ensure that miner received only the tx's effective tip.
+	actual = state.GetBalance(block.Coinbase()).ToBig()
+	expected = new(big.Int).Add(
+		new(big.Int).SetUint64(block.GasUsed()*effectiveTip),
+		ethash.ConstantinopleBlockReward.ToBig(),
+	)
+	if actual.Cmp(expected) != 0 {
+		t.Fatalf("miner balance incorrect: expected %d, got %d", expected, actual)
+	}
+
+	// check burnt contract balance
+	actual = state.GetBalance(common.HexToAddress(gspec.Config.Bor.CalculateBurntContract(block.NumberU64()))).ToBig()
+	expected = new(big.Int).Mul(new(big.Int).SetUint64(block.GasUsed()), block.BaseFee())
+	if actual.Cmp(expected) != 0 {
+		t.Fatalf("burnt contract balance incorrect: expected %d, got %d", expected, actual)
+	}
+
+	// 4: Ensure the tx sender paid for the gasUsed * (effectiveTip + block baseFee).
+	actual = new(big.Int).Sub(funds, state.GetBalance(addr2).ToBig())
+	expected = new(big.Int).SetUint64(block.GasUsed() * (effectiveTip + block.BaseFee().Uint64()))
+	if actual.Cmp(expected) != 0 {
+		t.Fatalf("sender balance incorrect: expected %d, got %d", expected, actual)
+	}
+
+	blocks, _ = core.GenerateChain(gspec.Config, block, engine, db, 1, func(i int, b *core.BlockGen) {
+		b.SetCoinbase(common.Address{3})
+
+		txdata := &types.LegacyTx{
+			Nonce:    0,
+			To:       &aa,
+			Gas:      30000,
+			GasPrice: newGwei(5),
+		}
+		tx := types.NewTx(txdata)
+		tx, _ = types.SignTx(tx, signer, key3)
+
+		b.AddTx(tx)
+	})
+
+	if n, err := chain.InsertChain(blocks); err != nil {
+		t.Fatalf("block %d: failed to insert into chain: %v", n, err)
+	}
+
+	block = chain.GetBlockByNumber(3)
+	state, _ = chain.State()
+	effectiveTip = block.Transactions()[0].GasTipCap().Uint64() - block.BaseFee().Uint64()
+
+	// 6+5: Ensure that miner received only the tx's effective tip.
+	actual = state.GetBalance(block.Coinbase()).ToBig()
+	expected = new(big.Int).Add(
+		new(big.Int).SetUint64(block.GasUsed()*effectiveTip),
+		ethash.ConstantinopleBlockReward.ToBig(),
+	)
+	if actual.Cmp(expected) != 0 {
+		t.Fatalf("miner balance incorrect: expected %d, got %d", expected, actual)
+	}
+
+	// check burnt contract balance
+	actual = state.GetBalance(common.HexToAddress(gspec.Config.Bor.CalculateBurntContract(block.NumberU64()))).ToBig()
+	expected = new(big.Int).Mul(new(big.Int).SetUint64(block.GasUsed()), block.BaseFee())
+	if actual.Cmp(expected) != 0 {
+		t.Fatalf("burnt contract balance incorrect: expected %d, got %d", expected, actual)
+	}
+
+	// 4: Ensure the tx sender paid for the gasUsed * (effectiveTip + block baseFee).
+	actual = new(big.Int).Sub(funds, state.GetBalance(addr3).ToBig())
+	expected = new(big.Int).SetUint64(block.GasUsed() * (effectiveTip + block.BaseFee().Uint64()))
+	if actual.Cmp(expected) != 0 {
+		t.Fatalf("sender balance incorrect: expected %d, got %d", expected, actual)
+	}
+}
+
+func TestBurnContractContractFetch(t *testing.T) {
+	t.Parallel()
+	config := params.BorUnittestChainConfig
+	config.Bor.BurntContract = map[string]string{
+		"10":  "0x000000000000000000000000000000000000aaab",
+		"100": "0x000000000000000000000000000000000000aaad",
+	}
+
+	burnContractAddr10 := config.Bor.CalculateBurntContract(10)
+	burnContractAddr11 := config.Bor.CalculateBurntContract(11)
+	burnContractAddr99 := config.Bor.CalculateBurntContract(99)
+	burnContractAddr100 := config.Bor.CalculateBurntContract(100)
+	burnContractAddr101 := config.Bor.CalculateBurntContract(101)
+
+	if burnContractAddr10 != "0x000000000000000000000000000000000000aaab" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaab", burnContractAddr10)
+	}
+	if burnContractAddr11 != "0x000000000000000000000000000000000000aaab" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaab", burnContractAddr11)
+	}
+	if burnContractAddr99 != "0x000000000000000000000000000000000000aaab" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaab", burnContractAddr99)
+	}
+	if burnContractAddr100 != "0x000000000000000000000000000000000000aaad" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaad", burnContractAddr100)
+	}
+	if burnContractAddr101 != "0x000000000000000000000000000000000000aaad" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaad", burnContractAddr101)
+	}
+
+	config.Bor.BurntContract = map[string]string{
+		"10":   "0x000000000000000000000000000000000000aaab",
+		"100":  "0x000000000000000000000000000000000000aaad",
+		"1000": "0x000000000000000000000000000000000000aaae",
+	}
+
+	burnContractAddr10 = config.Bor.CalculateBurntContract(10)
+	burnContractAddr11 = config.Bor.CalculateBurntContract(11)
+	burnContractAddr99 = config.Bor.CalculateBurntContract(99)
+	burnContractAddr100 = config.Bor.CalculateBurntContract(100)
+	burnContractAddr101 = config.Bor.CalculateBurntContract(101)
+	burnContractAddr999 := config.Bor.CalculateBurntContract(999)
+	burnContractAddr1000 := config.Bor.CalculateBurntContract(1000)
+	burnContractAddr1001 := config.Bor.CalculateBurntContract(1001)
+
+	if burnContractAddr10 != "0x000000000000000000000000000000000000aaab" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaab", burnContractAddr10)
+	}
+	if burnContractAddr11 != "0x000000000000000000000000000000000000aaab" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaab", burnContractAddr11)
+	}
+	if burnContractAddr99 != "0x000000000000000000000000000000000000aaab" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaab", burnContractAddr99)
+	}
+	if burnContractAddr100 != "0x000000000000000000000000000000000000aaad" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaad", burnContractAddr100)
+	}
+	if burnContractAddr101 != "0x000000000000000000000000000000000000aaad" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaad", burnContractAddr101)
+	}
+	if burnContractAddr999 != "0x000000000000000000000000000000000000aaad" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaad", burnContractAddr999)
+	}
+	if burnContractAddr1000 != "0x000000000000000000000000000000000000aaae" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaae", burnContractAddr1000)
+	}
+	if burnContractAddr1001 != "0x000000000000000000000000000000000000aaae" {
+		t.Fatalf("incorrect burnt contract address: expected %s, got %s", "0x000000000000000000000000000000000000aaae", burnContractAddr1001)
 	}
 }
 
@@ -917,7 +1299,7 @@ func TestEIP1559TransitionWithEIP155(t *testing.T) {
 		funds = new(big.Int).Mul(common.Big1, big.NewInt(params.Ether))
 		gspec = &core.Genesis{
 			Config: params.BorUnittestChainConfig,
-			Alloc: core.GenesisAlloc{
+			Alloc: types.GenesisAlloc{
 				addr1: {Balance: funds},
 				addr2: {Balance: funds},
 				addr3: {Balance: funds},
@@ -936,7 +1318,7 @@ func TestEIP1559TransitionWithEIP155(t *testing.T) {
 		}
 	)
 
-	genesis := gspec.MustCommit(db)
+	genesis := gspec.MustCommit(db, triedb.NewDatabase(db, triedb.HashDefaults))
 
 	// Use signer without chain ID
 	signer := types.HomesteadSigner{}
@@ -990,7 +1372,7 @@ func TestTransitionWithoutEIP155(t *testing.T) {
 		funds = new(big.Int).Mul(common.Big1, big.NewInt(params.Ether))
 		gspec = &core.Genesis{
 			Config: params.BorUnittestChainConfig,
-			Alloc: core.GenesisAlloc{
+			Alloc: types.GenesisAlloc{
 				addr1: {Balance: funds},
 				addr2: {Balance: funds},
 				addr3: {Balance: funds},
@@ -1009,7 +1391,7 @@ func TestTransitionWithoutEIP155(t *testing.T) {
 		}
 	)
 
-	genesis := gspec.MustCommit(db)
+	genesis := gspec.MustCommit(db, triedb.NewDatabase(db, triedb.HashDefaults))
 
 	// Use signer without chain ID
 	signer := types.HomesteadSigner{}
@@ -1041,9 +1423,9 @@ func TestTransitionWithoutEIP155(t *testing.T) {
 	})
 
 	diskdb := rawdb.NewMemoryDatabase()
-	gspec.MustCommit(diskdb)
+	gspec.MustCommit(diskdb, triedb.NewDatabase(diskdb, triedb.HashDefaults))
 
-	chain, err := core.NewBlockChain(diskdb, nil, gspec.Config, engine, vm.Config{}, nil, nil, nil)
+	chain, err := core.NewBlockChain(diskdb, nil, gspec, nil, engine, vm.Config{}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to create tester chain: %v", err)
 	}
@@ -1057,6 +1439,7 @@ func TestTransitionWithoutEIP155(t *testing.T) {
 }
 
 func TestJaipurFork(t *testing.T) {
+	t.Parallel()
 	init := buildEthereumInstance(t, rawdb.NewMemoryDatabase())
 	chain := init.ethereum.BlockChain()
 	engine := init.ethereum.Engine()
@@ -1064,10 +1447,12 @@ func TestJaipurFork(t *testing.T) {
 	_bor := engine.(*bor.Bor)
 	defer _bor.Close()
 
-	db := init.ethereum.ChainDb()
-	block := init.genesis.ToBlock(db)
+	block := init.genesis.ToBlock()
 
 	res, _ := loadSpanFromFile(t)
+
+	spanner := getMockedSpanner(t, res.Result.ValidatorSet.Validators)
+	_bor.SetSpanner(spanner)
 
 	for i := uint64(1); i < sprintSize; i++ {
 		block = buildNextBlock(t, _bor, chain, block, nil, init.genesis.Config.Bor, nil, res.Result.ValidatorSet.Validators)

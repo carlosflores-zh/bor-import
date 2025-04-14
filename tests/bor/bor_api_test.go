@@ -24,16 +24,13 @@ import (
 )
 
 var (
-	key1, _    = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-	addrr      = crypto.PubkeyToAddress(key1.PublicKey)
-	stack, _   = node.New(&node.DefaultConfig)
-	backend, _ = eth.New(stack, &ethconfig.Defaults)
-	db         = backend.ChainDb()
-	hash1      = common.BytesToHash([]byte("topic1"))
-	hash2      = common.BytesToHash([]byte("topic2"))
-	hash3      = common.BytesToHash([]byte("topic3"))
-	hash4      = common.BytesToHash([]byte("topic4"))
-	hash5      = common.BytesToHash([]byte("topic5"))
+	key1, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+	addrr   = crypto.PubkeyToAddress(key1.PublicKey)
+	hash1   = common.BytesToHash([]byte("topic1"))
+	hash2   = common.BytesToHash([]byte("topic2"))
+	hash3   = common.BytesToHash([]byte("topic3"))
+	hash4   = common.BytesToHash([]byte("topic4"))
+	hash5   = common.BytesToHash([]byte("topic5"))
 )
 
 func duplicateInArray(arr []common.Hash) bool {
@@ -62,7 +59,7 @@ func areDifferentHashes(receipts []map[string]interface{}) bool {
 }
 
 // Test for GetTransactionReceiptsByBlock
-func testGetTransactionReceiptsByBlock(t *testing.T, publicBlockchainAPI *ethapi.PublicBlockChainAPI) {
+func testGetTransactionReceiptsByBlock(t *testing.T, publicBlockchainAPI *ethapi.BlockChainAPI) {
 	// check 1 : zero transactions
 	receiptsOut, err := publicBlockchainAPI.GetTransactionReceiptsByBlock(context.Background(), rpc.BlockNumberOrHashWithNumber(1))
 	if err != nil {
@@ -98,10 +95,19 @@ func testGetTransactionReceiptsByBlock(t *testing.T, publicBlockchainAPI *ethapi
 	assert.Equal(t, 2, len(receiptsOut))
 	assert.True(t, areDifferentHashes(receiptsOut))
 
+	// check 5: Tx hash for state sync txn
+	block, err := publicBlockchainAPI.GetBlockByNumber(context.Background(), rpc.BlockNumber(4), false)
+	assert.Nil(t, err)
+	blockHash := block["hash"].(common.Hash)
+	txHash := types.GetDerivedBorTxHash(types.BorReceiptKey(4, blockHash))
+	// Compare tx hash from GetTransactionReceiptsByBlock with hash computed above
+	txReceipts, err := publicBlockchainAPI.GetTransactionReceiptsByBlock(context.Background(), rpc.BlockNumberOrHashWithNumber(4))
+	assert.Nil(t, err)
+	assert.Equal(t, txHash, txReceipts[1]["transactionHash"].(common.Hash))
 }
 
 // Test for GetTransactionByBlockNumberAndIndex
-func testGetTransactionByBlockNumberAndIndex(t *testing.T, publicTransactionPoolAPI *ethapi.PublicTransactionPoolAPI) {
+func testGetTransactionByBlockNumberAndIndex(t *testing.T, publicTransactionPoolAPI *ethapi.TransactionAPI) {
 	// check 1 : False ( no transaction )
 	tx := publicTransactionPoolAPI.GetTransactionByBlockNumberAndIndex(context.Background(), rpc.BlockNumber(1), 0)
 	assert.Nil(t, tx)
@@ -122,7 +128,7 @@ func testGetTransactionByBlockNumberAndIndex(t *testing.T, publicTransactionPool
 	tx = publicTransactionPoolAPI.GetTransactionByBlockNumberAndIndex(context.Background(), rpc.BlockNumber(4), 0)
 	assert.Equal(t, common.HexToAddress("0x1000"), *tx.To)
 
-	// check 5 : Normal Transaction
+	// check 5 : State Sync Transaction
 	tx = publicTransactionPoolAPI.GetTransactionByBlockNumberAndIndex(context.Background(), rpc.BlockNumber(4), 1)
 	assert.Equal(t, common.HexToAddress("0x0"), *tx.To)
 }
@@ -130,12 +136,9 @@ func testGetTransactionByBlockNumberAndIndex(t *testing.T, publicTransactionPool
 // This Testcase tests functions for RPC API calls.
 // NOTE : Changes to this function might affect the child testcases.
 func TestAPIs(t *testing.T) {
-
-	defer func() {
-		if err := stack.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
+	stack, _ := node.New(&node.DefaultConfig)
+	backend, _ := eth.New(stack, &ethconfig.Defaults)
+	db := backend.ChainDb()
 
 	genesis := core.GenesisBlockForTesting(db, addrr, big.NewInt(1000000))
 	testBorConfig := params.TestChainConfig.Bor
@@ -249,7 +252,7 @@ func TestAPIs(t *testing.T) {
 
 	// Testing GetTransactionByBlockNumberAndIndex
 	nonceLock := new(ethapi.AddrLocker)
-	publicTransactionPoolAPI := ethapi.NewPublicTransactionPoolAPI(backend.APIBackend, nonceLock)
+	publicTransactionPoolAPI := ethapi.NewTransactionAPI(backend.APIBackend, nonceLock)
 	testGetTransactionByBlockNumberAndIndex(t, publicTransactionPoolAPI)
 
 }

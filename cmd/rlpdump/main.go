@@ -25,7 +25,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -37,6 +39,7 @@ var (
 	reverseMode = flag.Bool("reverse", false, "convert ASCII to rlp")
 	noASCII     = flag.Bool("noascii", false, "don't print ASCII strings readably")
 	single      = flag.Bool("single", false, "print only the first element, discard the rest")
+	showpos     = flag.Bool("pos", false, "display element byte posititions")
 )
 
 func init() {
@@ -52,38 +55,49 @@ If the filename is omitted, data is read from stdin.`)
 func main() {
 	flag.Parse()
 
-	var r io.Reader
+	var r *inStream
 	switch {
 	case *hexMode != "":
 		data, err := hex.DecodeString(strings.TrimPrefix(*hexMode, "0x"))
 		if err != nil {
 			die(err)
 		}
-		r = bytes.NewReader(data)
+
+		r = newInStream(bytes.NewReader(data), int64(len(data)))
 
 	case flag.NArg() == 0:
-		r = os.Stdin
+		r = newInStream(bufio.NewReader(os.Stdin), 0)
 
 	case flag.NArg() == 1:
 		fd, err := os.Open(flag.Arg(0))
 		if err != nil {
 			die(err)
 		}
+
 		defer fd.Close()
-		r = fd
+		var size int64
+		finfo, err := fd.Stat()
+		if err == nil {
+			size = finfo.Size()
+		}
+		r = newInStream(bufio.NewReader(fd), size)
 
 	default:
 		fmt.Fprintln(os.Stderr, "Error: too many arguments")
 		flag.Usage()
 		os.Exit(2)
 	}
+
 	out := os.Stdout
+
 	if *reverseMode {
 		data, err := textToRlp(r)
 		if err != nil {
 			die(err)
 		}
-		fmt.Printf("0x%x\n", data)
+
+		fmt.Printf("%#x\n", data)
+
 		return
 	} else {
 		err := rlpToText(r, out)
@@ -93,34 +107,44 @@ func main() {
 	}
 }
 
-func rlpToText(r io.Reader, out io.Writer) error {
-	s := rlp.NewStream(r, 0)
+func rlpToText(in *inStream, out io.Writer) error {
+	stream := rlp.NewStream(in, 0)
+
 	for {
-		if err := dump(s, 0, out); err != nil {
+		if err := dump(in, stream, 0, out); err != nil {
 			if err != io.EOF {
 				return err
 			}
+
 			break
 		}
+
 		fmt.Fprintln(out)
+
 		if *single {
 			break
 		}
 	}
+
 	return nil
 }
 
-func dump(s *rlp.Stream, depth int, out io.Writer) error {
+func dump(in *inStream, s *rlp.Stream, depth int, out io.Writer) error {
+	if *showpos {
+		fmt.Fprintf(out, "%s: ", in.posLabel())
+	}
 	kind, size, err := s.Kind()
 	if err != nil {
 		return err
 	}
+
 	switch kind {
 	case rlp.Byte, rlp.String:
 		str, err := s.Bytes()
 		if err != nil {
 			return err
 		}
+
 		if len(str) == 0 || !*noASCII && isASCII(str) {
 			fmt.Fprintf(out, "%s%q", ws(depth), str)
 		} else {
@@ -129,15 +153,17 @@ func dump(s *rlp.Stream, depth int, out io.Writer) error {
 	case rlp.List:
 		s.List()
 		defer s.ListEnd()
+
 		if size == 0 {
-			fmt.Fprintf(out, ws(depth)+"[]")
+			fmt.Fprint(out, ws(depth)+"[]")
 		} else {
 			fmt.Fprintln(out, ws(depth)+"[")
+
 			for i := 0; ; i++ {
 				if i > 0 {
 					fmt.Fprint(out, ",\n")
 				}
-				if err := dump(s, depth+1, out); err == rlp.EOL {
+				if err := dump(in, s, depth+1, out); err == rlp.EOL {
 					break
 				} else if err != nil {
 					return err
@@ -146,6 +172,7 @@ func dump(s *rlp.Stream, depth int, out io.Writer) error {
 			fmt.Fprint(out, ws(depth)+"]")
 		}
 	}
+
 	return nil
 }
 
@@ -155,6 +182,7 @@ func isASCII(b []byte) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -178,11 +206,13 @@ func textToRlp(r io.Reader) ([]byte, error) {
 		obj     []interface{}
 		stack   = list.New()
 	)
+
 	for scanner.Scan() {
 		t := strings.TrimSpace(scanner.Text())
 		if len(t) == 0 {
 			continue
 		}
+
 		switch t {
 		case "[": // list start
 			stack.PushFront(obj)
@@ -199,12 +229,49 @@ func textToRlp(r io.Reader) ([]byte, error) {
 			} else { // hex data
 				data = common.FromHex(string(data))
 			}
+
 			obj = append(obj, data)
 		}
 	}
+
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
+
 	data, err := rlp.EncodeToBytes(obj[0])
+
 	return data, err
+}
+
+type inStream struct {
+	br      rlp.ByteReader
+	pos     int
+	columns int
+}
+
+func newInStream(br rlp.ByteReader, totalSize int64) *inStream {
+	col := int(math.Ceil(math.Log10(float64(totalSize))))
+	return &inStream{br: br, columns: col}
+}
+
+func (rc *inStream) Read(b []byte) (n int, err error) {
+	n, err = rc.br.Read(b)
+	rc.pos += n
+	return n, err
+}
+
+func (rc *inStream) ReadByte() (byte, error) {
+	b, err := rc.br.ReadByte()
+	if err == nil {
+		rc.pos++
+	}
+	return b, err
+}
+
+func (rc *inStream) posLabel() string {
+	l := strconv.FormatInt(int64(rc.pos), 10)
+	if len(l) < rc.columns {
+		l = strings.Repeat(" ", rc.columns-len(l)) + l
+	}
+	return l
 }

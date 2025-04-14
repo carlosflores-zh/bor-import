@@ -3,7 +3,6 @@
 package bor
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
@@ -26,9 +25,10 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/bor/heimdall" //nolint:typecheck
 	"github.com/ethereum/go-ethereum/consensus/bor/heimdall/span"
 	"github.com/ethereum/go-ethereum/consensus/bor/valset"
-	"github.com/ethereum/go-ethereum/consensus/misc"
+	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -43,6 +43,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/tests/bor/mocks"
+	"github.com/ethereum/go-ethereum/triedb"
 )
 
 var (
@@ -90,7 +91,7 @@ func setupMiner(t *testing.T, n int, genesis *core.Genesis) ([]*node.Node, []*et
 		// Start the node and wait until it's up
 		stack, ethBackend, err := InitMiner(genesis, keys[i], true)
 		if err != nil {
-			t.Fatal("Error occured while initialising miner", "error", err)
+			t.Fatal("Error occurred while initialising miner", "error", err)
 		}
 
 		for stack.Server().NodeInfo().Ports.Listener == 0 {
@@ -122,18 +123,19 @@ func buildEthereumInstance(t *testing.T, db ethdb.Database) *initializeData {
 	}
 
 	ethConf := &eth.Config{
-		Genesis: gen,
-		BorLogs: true,
+		Genesis:     gen,
+		BorLogs:     true,
+		StateScheme: "hash",
 	}
 
-	ethConf.Genesis.MustCommit(db)
+	ethConf.Genesis.MustCommit(db, triedb.NewDatabase(db, triedb.HashDefaults))
 
 	ethereum := utils.CreateBorEthereum(ethConf)
 	if err != nil {
 		t.Fatalf("failed to register Ethereum protocol: %v", err)
 	}
 
-	ethConf.Genesis.MustCommit(ethereum.ChainDb())
+	ethConf.Genesis.MustCommit(ethereum.ChainDb(), triedb.NewDatabase(ethereum.ChainDb(), triedb.HashDefaults))
 
 	ethereum.Engine().(*bor.Bor).Authorize(addr, func(account accounts.Account, s string, data []byte) ([]byte, error) {
 		return crypto.Sign(crypto.Keccak256(data), key)
@@ -194,7 +196,7 @@ func buildNextBlock(t *testing.T, _bor consensus.Engine, chain *core.BlockChain,
 	}
 
 	if chain.Config().IsLondon(header.Number) {
-		header.BaseFee = misc.CalcBaseFee(chain.Config(), parentBlock.Header())
+		header.BaseFee = eip1559.CalcBaseFee(chain.Config(), parentBlock.Header())
 
 		if !chain.Config().IsLondon(parentBlock.Number()) {
 			parentGasLimit := parentBlock.GasLimit() * params.ElasticityMultiplier
@@ -216,24 +218,28 @@ func buildNextBlock(t *testing.T, _bor consensus.Engine, chain *core.BlockChain,
 		b.addTxWithChain(chain, state, tx, addr)
 	}
 
-	ctx := context.Background()
-
 	// Finalize and seal the block
-	block, _ := _bor.FinalizeAndAssemble(ctx, chain, b.header, state, b.txs, nil, b.receipts)
+	block, err := _bor.FinalizeAndAssemble(chain, b.header, state, &types.Body{
+		Transactions: b.txs,
+	}, b.receipts)
+
+	if err != nil {
+		panic(fmt.Sprintf("error finalizing block: %v", err))
+	}
 
 	// Write state changes to db
-	root, err := state.Commit(chain.Config().IsEIP158(b.header.Number))
+	root, err := state.Commit(block.NumberU64(), chain.Config().IsEIP158(b.header.Number))
 	if err != nil {
 		panic(fmt.Sprintf("state write error: %v", err))
 	}
 
-	if err := state.Database().TrieDB().Commit(root, false, nil); err != nil {
+	if err := state.Database().TrieDB().Commit(root, false); err != nil {
 		panic(fmt.Sprintf("trie write error: %v", err))
 	}
 
 	res := make(chan *types.Block, 1)
 
-	err = _bor.Seal(ctx, chain, block, res, nil)
+	err = _bor.Seal(chain, block, res, nil)
 	if err != nil {
 		// an error case - sign manually
 		sign(t, header, signer, borConfig)
@@ -255,9 +261,9 @@ func (b *blockGen) addTxWithChain(bc *core.BlockChain, statedb *state.StateDB, t
 		b.setCoinbase(coinbase)
 	}
 
-	statedb.Prepare(tx.Hash(), len(b.txs))
+	statedb.SetTxContext(tx.Hash(), len(b.txs))
 
-	receipt, err := core.ApplyTransaction(bc.Config(), bc, &b.header.Coinbase, b.gasPool, statedb, b.header, tx, &b.header.GasUsed, vm.Config{})
+	receipt, err := core.ApplyTransaction(bc.Config(), bc, &b.header.Coinbase, b.gasPool, statedb, b.header, tx, &b.header.GasUsed, vm.Config{}, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -352,6 +358,17 @@ func getMockedHeimdallClient(t *testing.T, heimdallSpan *span.HeimdallSpan) (*mo
 	return h, ctrl
 }
 
+func getMockedSpanner(t *testing.T, validators []*valset.Validator) *bor.MockSpanner {
+	t.Helper()
+
+	spanner := bor.NewMockSpanner(gomock.NewController(t))
+	spanner.EXPECT().GetCurrentValidatorsByHash(gomock.Any(), gomock.Any(), gomock.Any()).Return(validators, nil).AnyTimes()
+	spanner.EXPECT().GetCurrentValidatorsByBlockNrOrHash(gomock.Any(), gomock.Any(), gomock.Any()).Return(validators, nil).AnyTimes()
+	spanner.EXPECT().GetCurrentSpan(gomock.Any(), gomock.Any()).Return(&span.Span{0, 0, 0}, nil).AnyTimes()
+	spanner.EXPECT().CommitSpan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	return spanner
+}
+
 func generateFakeStateSyncEvents(sample *clerk.EventRecordWithTime, count int) []*clerk.EventRecordWithTime {
 	events := make([]*clerk.EventRecordWithTime, count)
 	event := *sample
@@ -360,7 +377,7 @@ func generateFakeStateSyncEvents(sample *clerk.EventRecordWithTime, count int) [
 	*events[0] = event
 
 	for i := 1; i < count; i++ {
-		event.ID = uint64(i)
+		event.ID = uint64(i + 1)
 		event.Time = event.Time.Add(1 * time.Second)
 		events[i] = &clerk.EventRecordWithTime{}
 		*events[i] = event
@@ -422,7 +439,8 @@ func InitGenesis(t *testing.T, faucets []*ecdsa.PrivateKey, fileLocation string,
 	}
 
 	genesis.Config.ChainID = big.NewInt(15001)
-	genesis.Config.EIP150Hash = common.Hash{}
+	genesis.Config.EIP150Block = big.NewInt(0)
+
 	genesis.Config.Bor.Sprint["0"] = sprintSize
 
 	return genesis
@@ -455,9 +473,8 @@ func InitMiner(genesis *core.Genesis, privKey *ecdsa.PrivateKey, withoutHeimdall
 		SyncMode:        downloader.FullSync,
 		DatabaseCache:   256,
 		DatabaseHandles: 256,
-		TxPool:          core.DefaultTxPoolConfig,
+		TxPool:          legacypool.DefaultConfig,
 		GPO:             ethconfig.Defaults.GPO,
-		Ethash:          ethconfig.Defaults.Ethash,
 		Miner: miner.Config{
 			Etherbase: crypto.PubkeyToAddress(privKey.PublicKey),
 			GasCeil:   genesis.GasLimit * 11 / 10,

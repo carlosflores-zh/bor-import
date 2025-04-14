@@ -18,18 +18,31 @@ package params
 
 import (
 	"fmt"
+
+	"github.com/ethereum/go-ethereum/metrics"
 )
 
 const (
-	VersionMajor = 0        // Major version component of the current release
-	VersionMinor = 3        // Minor version component of the current release
-	VersionPatch = 3        // Patch version component of the current release
-	VersionMeta  = "stable" // Version metadata to append to the version string
+	VersionMajor = 2  // Major version component of the current release
+	VersionMinor = 0  // Minor version component of the current release
+	VersionPatch = 0  // Patch version component of the current release
+	VersionMeta  = "" // Version metadata to append to the version string
 )
 
 var (
-	GitCommit = ""
+	// borInfoGauge stores Bor git commit and version details.
+	borInfoGauge = metrics.NewRegisteredGaugeInfo("bor/info", nil)
+
+	GitCommit string
 )
+
+// UpdateBorInfo updates the bor_info metric with the current git commit and version details.
+func UpdateBorInfo() {
+	borInfoGauge.Update(metrics.GaugeInfoValue{
+		"commit":  GitCommit,
+		"version": VersionWithMeta,
+	})
+}
 
 // Version holds the textual version string.
 var Version = func() string {
@@ -51,22 +64,22 @@ var VersionWithMetaCommitDetails = func() string {
 	if VersionMeta != "" {
 		v += "-" + VersionMeta
 	}
-	v_git := fmt.Sprintf("Version : %s\nGitCommit : %s\n", v, GitCommit)
+	v_git := fmt.Sprintf("Version: %s\nGitCommit: %s", v, GitCommit)
 	return v_git
 }()
 
 // ArchiveVersion holds the textual version string used for Geth archives.
 // e.g. "1.8.11-dea1ce05" for stable releases, or
-//
-//	"1.8.13-unstable-21c059b6" for unstable releases
 func ArchiveVersion(gitCommit string) string {
 	vsn := Version
 	if VersionMeta != "stable" {
 		vsn += "-" + VersionMeta
 	}
+
 	if len(gitCommit) >= 8 {
 		vsn += "-" + gitCommit[:8]
 	}
+
 	return vsn
 }
 
@@ -75,8 +88,10 @@ func VersionWithCommit(gitCommit, gitDate string) string {
 	if len(gitCommit) >= 8 {
 		vsn += "-" + gitCommit[:8]
 	}
+
 	if (VersionMeta != "stable") && (gitDate != "") {
 		vsn += "-" + gitDate
 	}
+
 	return vsn
 }

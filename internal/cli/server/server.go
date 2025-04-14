@@ -9,25 +9,16 @@ import (
 	"net/http"
 	"os"
 	"runtime"
-	"strings"
 	"time"
-
-	"github.com/mattn/go-colorable"
-	"github.com/mattn/go-isatty"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/sdk/resource"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
-	"google.golang.org/grpc"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
+	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/consensus/beacon" //nolint:typecheck
 	"github.com/ethereum/go-ethereum/consensus/bor"    //nolint:typecheck
 	"github.com/ethereum/go-ethereum/consensus/clique"
 	"github.com/ethereum/go-ethereum/eth"
+	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/ethstats"
 	"github.com/ethereum/go-ethereum/graphql"
@@ -38,14 +29,29 @@ import (
 	"github.com/ethereum/go-ethereum/metrics/influxdb"
 	"github.com/ethereum/go-ethereum/metrics/prometheus"
 	"github.com/ethereum/go-ethereum/node"
+	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/mattn/go-colorable"
+	"github.com/mattn/go-isatty"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 
 	// Force-load the tracer engines to trigger registration
 	_ "github.com/ethereum/go-ethereum/eth/tracers/js"
 	_ "github.com/ethereum/go-ethereum/eth/tracers/native"
+
+	protobor "github.com/maticnetwork/polyproto/bor"
 )
 
 type Server struct {
 	proto.UnimplementedBorServer
+	protobor.UnimplementedBorApiServer
+
 	node       *node.Node
 	backend    *eth.Ethereum
 	grpcServer *grpc.Server
@@ -61,9 +67,8 @@ type serverOption func(srv *Server, config *Config) error
 var glogger *log.GlogHandler
 
 func init() {
-	glogger = log.NewGlogHandler(log.StreamHandler(os.Stderr, log.TerminalFormat(false)))
-	glogger.Verbosity(log.LvlInfo)
-	log.Root().SetHandler(glogger)
+	handler := log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelInfo, false)
+	log.SetDefault(log.NewLogger(handler))
 }
 
 func WithGRPCAddress() serverOption {
@@ -120,7 +125,7 @@ func NewServer(config *Config, opts ...serverOption) (*Server, error) {
 	}
 
 	// start the logger
-	setupLogger(VerbosityIntToString(config.Verbosity), *config.Logging)
+	setupLogger(config.Verbosity, *config.Logging)
 
 	var err error
 
@@ -165,6 +170,8 @@ func NewServer(config *Config, opts ...serverOption) (*Server, error) {
 	// flag to set if we're authorizing consensus here
 	authorized := false
 
+	var ethCfg *ethconfig.Config
+
 	// check if personal wallet endpoints are disabled or not
 	// nolint:nestif
 	if !config.Accounts.DisableBorWallet {
@@ -172,7 +179,7 @@ func NewServer(config *Config, opts ...serverOption) (*Server, error) {
 		stack.AccountManager().AddBackend(keystore.NewKeyStore(keydir, n, p))
 
 		// register the ethereum backend
-		ethCfg, err := config.buildEth(stack, stack.AccountManager())
+		ethCfg, err = config.buildEth(stack, stack.AccountManager())
 		if err != nil {
 			return nil, err
 		}
@@ -185,7 +192,7 @@ func NewServer(config *Config, opts ...serverOption) (*Server, error) {
 		srv.backend = backend
 	} else {
 		// register the ethereum backend (with temporary created account manager)
-		ethCfg, err := config.buildEth(stack, accountManager)
+		ethCfg, err = config.buildEth(stack, accountManager)
 		if err != nil {
 			return nil, err
 		}
@@ -216,6 +223,7 @@ func NewServer(config *Config, opts ...serverOption) (*Server, error) {
 					cli = c
 				}
 			}
+
 			if cli != nil {
 				wallet, err := accountManager.Find(accounts.Account{Address: eb})
 				if wallet == nil || err != nil {
@@ -224,6 +232,7 @@ func NewServer(config *Config, opts ...serverOption) (*Server, error) {
 				}
 
 				cli.Authorize(eb, wallet.SignData)
+
 				authorized = true
 			}
 
@@ -236,6 +245,7 @@ func NewServer(config *Config, opts ...serverOption) (*Server, error) {
 				}
 
 				bor.Authorize(eb, wallet.SignData)
+
 				authorized = true
 			}
 		}
@@ -244,13 +254,15 @@ func NewServer(config *Config, opts ...serverOption) (*Server, error) {
 	// set the auth status in backend
 	srv.backend.SetAuthorized(authorized)
 
+	filterSystem := utils.RegisterFilterAPI(stack, srv.backend.APIBackend, ethCfg)
+
 	// debug tracing is enabled by default
 	stack.RegisterAPIs(tracers.APIs(srv.backend.APIBackend))
 	srv.tracerAPI = tracers.NewAPI(srv.backend.APIBackend)
 
 	// graphql is started from another place
 	if config.JsonRPC.Graphql.Enabled {
-		if err := graphql.New(stack, srv.backend.APIBackend, config.JsonRPC.Graphql.Cors, config.JsonRPC.Graphql.VHost); err != nil {
+		if err := graphql.New(stack, srv.backend.APIBackend, filterSystem, config.JsonRPC.Graphql.Cors, config.JsonRPC.Graphql.VHost); err != nil {
 			return nil, fmt.Errorf("failed to register the GraphQL service: %v", err)
 		}
 	}
@@ -264,7 +276,7 @@ func NewServer(config *Config, opts ...serverOption) (*Server, error) {
 
 	// sealing (if enabled) or in dev mode
 	if config.Sealer.Enabled || config.Developer.Enabled {
-		if err := srv.backend.StartMining(1); err != nil {
+		if err := srv.backend.StartMining(); err != nil {
 			return nil, err
 		}
 	}
@@ -303,19 +315,17 @@ func (s *Server) Stop() {
 
 func (s *Server) setupMetrics(config *TelemetryConfig, serviceName string) error {
 	// Check the global metrics if they're matching with the provided config
-	if metrics.Enabled != config.Enabled || metrics.EnabledExpensive != config.Expensive {
+	if metrics.Enabled != config.Enabled {
 		log.Warn(
 			"Metric misconfiguration, some of them might not be visible",
 			"metrics", metrics.Enabled,
 			"config.metrics", config.Enabled,
-			"expensive", metrics.EnabledExpensive,
 			"config.expensive", config.Expensive,
 		)
 	}
 
 	// Update the values anyways (for services which don't need immediate attention)
 	metrics.Enabled = config.Enabled
-	metrics.EnabledExpensive = config.Expensive
 
 	if !metrics.Enabled {
 		// metrics are disabled, do not set up any sink
@@ -323,10 +333,6 @@ func (s *Server) setupMetrics(config *TelemetryConfig, serviceName string) error
 	}
 
 	log.Info("Enabling metrics collection")
-
-	if metrics.EnabledExpensive {
-		log.Info("Enabling expensive metrics collection")
-	}
 
 	// influxdb
 	if v1Enabled, v2Enabled := config.InfluxDB.V1Enabled, config.InfluxDB.V2Enabled; v1Enabled || v2Enabled {
@@ -343,6 +349,7 @@ func (s *Server) setupMetrics(config *TelemetryConfig, serviceName string) error
 
 			go influxdb.InfluxDBWithTags(metrics.DefaultRegistry, 10*time.Second, endpoint, cfg.Database, cfg.Username, cfg.Password, "geth.", tags)
 		}
+
 		if v2Enabled {
 			log.Info("Enabling metrics export to InfluxDB (v2)")
 
@@ -354,14 +361,19 @@ func (s *Server) setupMetrics(config *TelemetryConfig, serviceName string) error
 	go metrics.CollectProcessMetrics(3 * time.Second)
 
 	if config.PrometheusAddr != "" {
-
 		prometheusMux := http.NewServeMux()
 
 		prometheusMux.Handle("/debug/metrics/prometheus", prometheus.Handler(metrics.DefaultRegistry))
 
+		timeouts := rpc.DefaultHTTPTimeouts
+
 		promServer := &http.Server{
-			Addr:    config.PrometheusAddr,
-			Handler: prometheusMux,
+			Addr:              config.PrometheusAddr,
+			Handler:           prometheusMux,
+			ReadTimeout:       timeouts.ReadTimeout,
+			ReadHeaderTimeout: timeouts.ReadHeaderTimeout,
+			WriteTimeout:      timeouts.WriteTimeout,
+			IdleTimeout:       timeouts.IdleTimeout,
 		}
 
 		go func() {
@@ -371,7 +383,6 @@ func (s *Server) setupMetrics(config *TelemetryConfig, serviceName string) error
 		}()
 
 		log.Info("Enabling metrics export to prometheus", "path", fmt.Sprintf("http://%s/debug/metrics/prometheus", config.PrometheusAddr))
-
 	}
 
 	if config.OpenCollectorEndpoint != "" {
@@ -432,6 +443,8 @@ func (s *Server) gRPCServerByAddress(addr string) error {
 func (s *Server) gRPCServerByListener(listener net.Listener) error {
 	s.grpcServer = grpc.NewServer(s.withLoggingUnaryInterceptor())
 	proto.RegisterBorServer(s.grpcServer, s)
+	protobor.RegisterBorApiServer(s.grpcServer, s)
+	reflection.Register(s.grpcServer)
 
 	go func() {
 		if err := s.grpcServer.Serve(listener); err != nil {
@@ -457,30 +470,23 @@ func (s *Server) loggingServerInterceptor(ctx context.Context, req interface{}, 
 	return h, err
 }
 
-func setupLogger(logLevel string, loggingInfo LoggingConfig) {
-	var ostream log.Handler
-
+func setupLogger(logLevel int, loggingInfo LoggingConfig) {
 	output := io.Writer(os.Stderr)
 
 	if loggingInfo.Json {
-		ostream = log.StreamHandler(output, log.JSONFormat())
+		glogger = log.NewGlogHandler(log.JSONHandler(os.Stderr))
 	} else {
 		usecolor := (isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd())) && os.Getenv("TERM") != "dumb"
 		if usecolor {
 			output = colorable.NewColorableStderr()
 		}
-		ostream = log.StreamHandler(output, log.TerminalFormat(usecolor))
-	}
 
-	glogger.SetHandler(ostream)
+		glogger = log.NewGlogHandler(log.NewTerminalHandler(output, usecolor))
+	}
 
 	// logging
-	lvl, err := log.LvlFromString(strings.ToLower(logLevel))
-	if err == nil {
-		glogger.Verbosity(lvl)
-	} else {
-		glogger.Verbosity(log.LvlInfo)
-	}
+	lvl := log.FromLegacyLevel(logLevel)
+	glogger.Verbosity(lvl)
 
 	if loggingInfo.Vmodule != "" {
 		if err := glogger.Vmodule(loggingInfo.Vmodule); err != nil {
@@ -488,19 +494,11 @@ func setupLogger(logLevel string, loggingInfo LoggingConfig) {
 		}
 	}
 
-	log.PrintOrigins(loggingInfo.Debug)
-
-	if loggingInfo.Backtrace != "" {
-		if err := glogger.BacktraceAt(loggingInfo.Backtrace); err != nil {
-			log.Error("failed to set BacktraceAt", "err", err)
-		}
-	}
-
-	log.Root().SetHandler(glogger)
+	log.SetDefault(log.NewLogger(glogger))
 }
 
 func (s *Server) GetLatestBlockNumber() *big.Int {
-	return s.backend.BlockChain().CurrentBlock().Number()
+	return s.backend.BlockChain().CurrentBlock().Number
 }
 
 func (s *Server) GetGrpcAddr() string {

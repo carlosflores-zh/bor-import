@@ -1,16 +1,35 @@
+// Copyright 2021 The go-ethereum Authors
+// This file is part of go-ethereum.
+//
+// go-ethereum is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// go-ethereum is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with go-ethereum. If not, see <http://www.gnu.org/licenses/>.
+
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/pkg/reexec"
 	"github.com/ethereum/go-ethereum/cmd/evm/internal/t8ntool"
 	"github.com/ethereum/go-ethereum/internal/cmdtest"
+	"github.com/ethereum/go-ethereum/internal/reexec"
 )
 
 func TestMain(m *testing.M) {
@@ -20,12 +39,14 @@ func TestMain(m *testing.M) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+
 		os.Exit(0)
 	})
 	// check if we have been reexec'd
 	if reexec.Init() {
 		return
 	}
+
 	os.Exit(m.Run())
 }
 
@@ -47,20 +68,25 @@ func (args *t8nInput) get(base string) []string {
 		out = append(out, "--input.alloc")
 		out = append(out, fmt.Sprintf("%v/%v", base, opt))
 	}
+
 	if opt := args.inTxs; opt != "" {
 		out = append(out, "--input.txs")
 		out = append(out, fmt.Sprintf("%v/%v", base, opt))
 	}
+
 	if opt := args.inEnv; opt != "" {
 		out = append(out, "--input.env")
 		out = append(out, fmt.Sprintf("%v/%v", base, opt))
 	}
+
 	if opt := args.stFork; opt != "" {
 		out = append(out, "--state.fork", opt)
 	}
+
 	if opt := args.stReward; opt != "" {
 		out = append(out, "--state.reward", opt)
 	}
+
 	return out
 }
 
@@ -76,22 +102,27 @@ func (args *t8nOutput) get() (out []string) {
 	} else {
 		out = append(out, "--output.body", "") // empty means ignore
 	}
+
 	if args.result {
 		out = append(out, "--output.result", "stdout")
 	} else {
 		out = append(out, "--output.result", "")
 	}
+
 	if args.alloc {
 		out = append(out, "--output.alloc", "stdout")
 	} else {
 		out = append(out, "--output.alloc", "")
 	}
+
 	return out
 }
 
 func TestT8n(t *testing.T) {
+	t.Parallel()
 	tt := new(testT8n)
 	tt.TestCmd = cmdtest.NewTestCmd(t, tt)
+
 	for i, tc := range []struct {
 		base        string
 		input       t8nInput
@@ -195,6 +226,14 @@ func TestT8n(t *testing.T) {
 			output: t8nOutput{result: true},
 			expOut: "exp_arrowglacier.json",
 		},
+		{ // Difficulty calculation on gray glacier
+			base: "./testdata/19",
+			input: t8nInput{
+				"alloc.json", "txs.json", "env.json", "GrayGlacier", "",
+			},
+			output: t8nOutput{result: true},
+			expOut: "exp_grayglacier.json",
+		},
 		{ // Sign unprotected (pre-EIP155) transaction
 			base: "./testdata/23",
 			input: t8nInput{
@@ -203,11 +242,173 @@ func TestT8n(t *testing.T) {
 			output: t8nOutput{result: true},
 			expOut: "exp.json",
 		},
+		{ // Test post-merge transition
+			base: "./testdata/24",
+			input: t8nInput{
+				"alloc.json", "txs.json", "env.json", "Paris", "",
+			},
+			output: t8nOutput{alloc: true, result: true},
+			expOut: "exp.json",
+		},
+		{ // Test post-merge transition where input is missing random
+			base: "./testdata/24",
+			input: t8nInput{
+				"alloc.json", "txs.json", "env-missingrandom.json", "Paris", "",
+			},
+			output:      t8nOutput{alloc: false, result: false},
+			expExitCode: 3,
+		},
+		{ // Test base fee calculation
+			base: "./testdata/25",
+			input: t8nInput{
+				"alloc.json", "txs.json", "env.json", "Paris", "",
+			},
+			output: t8nOutput{alloc: true, result: true},
+			expOut: "exp.json",
+		},
+		{ // Test withdrawals transition
+			base: "./testdata/26",
+			input: t8nInput{
+				"alloc.json", "txs.json", "env.json", "Shanghai", "",
+			},
+			output: t8nOutput{alloc: true, result: true},
+			expOut: "exp.json",
+		},
+		{ // Cancun tests
+			base: "./testdata/28",
+			input: t8nInput{
+				"alloc.json", "txs.rlp", "env.json", "Cancun", "",
+			},
+			output: t8nOutput{alloc: true, result: true},
+			expOut: "exp.json",
+		},
+		{ // More cancun tests
+			base: "./testdata/29",
+			input: t8nInput{
+				"alloc.json", "txs.json", "env.json", "Cancun", "",
+			},
+			output: t8nOutput{alloc: true, result: true},
+			expOut: "exp.json",
+		},
+		{ // More cancun test, plus example of rlp-transaction that cannot be decoded properly
+			base: "./testdata/30",
+			input: t8nInput{
+				"alloc.json", "txs_more.rlp", "env.json", "Cancun", "",
+			},
+			output: t8nOutput{alloc: true, result: true},
+			expOut: "exp.json",
+		},
 	} {
-
 		args := []string{"t8n"}
 		args = append(args, tc.output.get()...)
 		args = append(args, tc.input.get(tc.base)...)
+
+		var qArgs []string // quoted args for debugging purposes
+
+		for _, arg := range args {
+			if len(arg) == 0 {
+				qArgs = append(qArgs, `""`)
+			} else {
+				qArgs = append(qArgs, arg)
+			}
+		}
+
+		tt.Logf("args: %v\n", strings.Join(qArgs, " "))
+		tt.Run("evm-test", args...)
+		// Compare the expected output, if provided
+		if tc.expOut != "" {
+			file := fmt.Sprintf("%v/%v", tc.base, tc.expOut)
+			want, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatalf("test %d: could not read expected output: %v", i, err)
+			}
+
+			have := tt.Output()
+
+			ok, err := cmpJson(have, want)
+			switch {
+			case err != nil:
+				t.Fatalf("test %d, file %v: json parsing failed: %v", i, file, err)
+			case !ok:
+				t.Fatalf("test %d, file %v: output wrong, have \n%v\nwant\n%v\n", i, file, string(have), string(want))
+			}
+		}
+
+		tt.WaitExit()
+
+		if have, want := tt.ExitStatus(), tc.expExitCode; have != want {
+			t.Fatalf("test %d: wrong exit code, have %d, want %d", i, have, want)
+		}
+	}
+}
+
+func lineIterator(path string) func() (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return func() (string, error) { return err.Error(), err }
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	return func() (string, error) {
+		if scanner.Scan() {
+			return scanner.Text(), nil
+		}
+		if err := scanner.Err(); err != nil {
+			return "", err
+		}
+		return "", io.EOF // scanner gobbles io.EOF, but we want it
+	}
+}
+
+// TestT8nTracing is a test that checks the tracing-output from t8n.
+func TestT8nTracing(t *testing.T) {
+	t.Parallel()
+	tt := new(testT8n)
+	tt.TestCmd = cmdtest.NewTestCmd(t, tt)
+	for i, tc := range []struct {
+		base           string
+		input          t8nInput
+		expExitCode    int
+		extraArgs      []string
+		expectedTraces []string
+	}{
+		{
+			base: "./testdata/31",
+			input: t8nInput{
+				"alloc.json", "txs.json", "env.json", "Cancun", "",
+			},
+			extraArgs:      []string{"--trace"},
+			expectedTraces: []string{"trace-0-0x88f5fbd1524731a81e49f637aa847543268a5aaf2a6b32a69d2c6d978c45dcfb.jsonl"},
+		},
+		{
+			base: "./testdata/31",
+			input: t8nInput{
+				"alloc.json", "txs.json", "env.json", "Cancun", "",
+			},
+			extraArgs: []string{"--trace.tracer", `
+{ 
+	result: function(){ 
+		return "hello world"
+	}, 
+	fault: function(){} 
+}`},
+			expectedTraces: []string{"trace-0-0x88f5fbd1524731a81e49f637aa847543268a5aaf2a6b32a69d2c6d978c45dcfb.json"},
+		},
+		{
+			base: "./testdata/32",
+			input: t8nInput{
+				"alloc.json", "txs.json", "env.json", "Paris", "",
+			},
+			extraArgs:      []string{"--trace", "--trace.callframes"},
+			expectedTraces: []string{"trace-0-0x47806361c0fa084be3caa18afe8c48156747c01dbdfc1ee11b5aecdbe4fcf23e.jsonl"},
+		},
+	} {
+		args := []string{"t8n"}
+		args = append(args, tc.input.get(tc.base)...)
+		// Place the output somewhere we can find it
+		outdir := t.TempDir()
+		args = append(args, "--output.basedir", outdir)
+		args = append(args, tc.extraArgs...)
+
 		var qArgs []string // quoted args for debugging purposes
 		for _, arg := range args {
 			if len(arg) == 0 {
@@ -218,22 +419,32 @@ func TestT8n(t *testing.T) {
 		}
 		tt.Logf("args: %v\n", strings.Join(qArgs, " "))
 		tt.Run("evm-test", args...)
-		// Compare the expected output, if provided
-		if tc.expOut != "" {
-			want, err := os.ReadFile(fmt.Sprintf("%v/%v", tc.base, tc.expOut))
-			if err != nil {
-				t.Fatalf("test %d: could not read expected output: %v", i, err)
-			}
-			have := tt.Output()
-			ok, err := cmpJson(have, want)
-			switch {
-			case err != nil:
-				t.Fatalf("test %d, json parsing failed: %v", i, err)
-			case !ok:
-				t.Fatalf("test %d: output wrong, have \n%v\nwant\n%v\n", i, string(have), string(want))
+		t.Log(string(tt.Output()))
+
+		// Compare the expected traces
+		for _, traceFile := range tc.expectedTraces {
+			haveFn := lineIterator(filepath.Join(outdir, traceFile))
+			wantFn := lineIterator(filepath.Join(tc.base, traceFile))
+
+			for line := 0; ; line++ {
+				want, wErr := wantFn()
+				have, hErr := haveFn()
+				if want != have {
+					t.Fatalf("test %d, trace %v, line %d\nwant: %v\nhave: %v\n",
+						i, traceFile, line, want, have)
+				}
+				if wErr != nil && hErr != nil {
+					break
+				}
+				if wErr != nil {
+					t.Fatal(wErr)
+				}
+				if hErr != nil {
+					t.Fatal(hErr)
+				}
+				t.Logf("%v\n", want)
 			}
 		}
-		tt.WaitExit()
 		if have, want := tt.ExitStatus(), tc.expExitCode; have != want {
 			t.Fatalf("test %d: wrong exit code, have %d, want %d", i, have, want)
 		}
@@ -251,15 +462,19 @@ func (args *t9nInput) get(base string) []string {
 		out = append(out, "--input.txs")
 		out = append(out, fmt.Sprintf("%v/%v", base, opt))
 	}
+
 	if opt := args.stFork; opt != "" {
 		out = append(out, "--state.fork", opt)
 	}
+
 	return out
 }
 
 func TestT9n(t *testing.T) {
+	t.Parallel()
 	tt := new(testT8n)
 	tt.TestCmd = cmdtest.NewTestCmd(t, tt)
+
 	for i, tc := range []struct {
 		base        string
 		input       t9nInput
@@ -315,7 +530,6 @@ func TestT9n(t *testing.T) {
 			expExitCode: t8ntool.ErrorIO,
 		},
 	} {
-
 		args := []string{"t9n"}
 		args = append(args, tc.input.get(tc.base)...)
 
@@ -327,17 +541,21 @@ func TestT9n(t *testing.T) {
 			if err != nil {
 				t.Fatalf("test %d: could not read expected output: %v", i, err)
 			}
+
 			have := tt.Output()
 			ok, err := cmpJson(have, want)
+
 			switch {
 			case err != nil:
-				t.Logf(string(have))
+				t.Log(string(have))
 				t.Fatalf("test %d, json parsing failed: %v", i, err)
 			case !ok:
 				t.Fatalf("test %d: output wrong, have \n%v\nwant\n%v\n", i, string(have), string(want))
 			}
 		}
+
 		tt.WaitExit()
+
 		if have, want := tt.ExitStatus(), tc.expExitCode; have != want {
 			t.Fatalf("test %d: wrong exit code, have %d, want %d", i, have, want)
 		}
@@ -345,13 +563,14 @@ func TestT9n(t *testing.T) {
 }
 
 type b11rInput struct {
-	inEnv       string
-	inOmmersRlp string
-	inTxsRlp    string
-	inClique    string
-	ethash      bool
-	ethashMode  string
-	ethashDir   string
+	inEnv         string
+	inOmmersRlp   string
+	inWithdrawals string
+	inTxsRlp      string
+	inClique      string
+	ethash        bool
+	ethashMode    string
+	ethashDir     string
 }
 
 func (args *b11rInput) get(base string) []string {
@@ -360,37 +579,52 @@ func (args *b11rInput) get(base string) []string {
 		out = append(out, "--input.header")
 		out = append(out, fmt.Sprintf("%v/%v", base, opt))
 	}
+
 	if opt := args.inOmmersRlp; opt != "" {
 		out = append(out, "--input.ommers")
 		out = append(out, fmt.Sprintf("%v/%v", base, opt))
 	}
+
+	if opt := args.inWithdrawals; opt != "" {
+		out = append(out, "--input.withdrawals")
+		out = append(out, fmt.Sprintf("%v/%v", base, opt))
+	}
+
 	if opt := args.inTxsRlp; opt != "" {
 		out = append(out, "--input.txs")
 		out = append(out, fmt.Sprintf("%v/%v", base, opt))
 	}
+
 	if opt := args.inClique; opt != "" {
 		out = append(out, "--seal.clique")
 		out = append(out, fmt.Sprintf("%v/%v", base, opt))
 	}
+
 	if args.ethash {
 		out = append(out, "--seal.ethash")
 	}
+
 	if opt := args.ethashMode; opt != "" {
 		out = append(out, "--seal.ethash.mode")
 		out = append(out, fmt.Sprintf("%v/%v", base, opt))
 	}
+
 	if opt := args.ethashDir; opt != "" {
 		out = append(out, "--seal.ethash.dir")
 		out = append(out, fmt.Sprintf("%v/%v", base, opt))
 	}
+
 	out = append(out, "--output.block")
 	out = append(out, "stdout")
+
 	return out
 }
 
 func TestB11r(t *testing.T) {
+	t.Parallel()
 	tt := new(testT8n)
 	tt.TestCmd = cmdtest.NewTestCmd(t, tt)
+
 	for i, tc := range []struct {
 		base        string
 		input       b11rInput
@@ -434,8 +668,17 @@ func TestB11r(t *testing.T) {
 			},
 			expOut: "exp.json",
 		},
+		{ // block with withdrawals
+			base: "./testdata/27",
+			input: b11rInput{
+				inEnv:         "header.json",
+				inOmmersRlp:   "ommers.json",
+				inWithdrawals: "withdrawals.json",
+				inTxsRlp:      "txs.rlp",
+			},
+			expOut: "exp.json",
+		},
 	} {
-
 		args := []string{"b11r"}
 		args = append(args, tc.input.get(tc.base)...)
 
@@ -447,17 +690,21 @@ func TestB11r(t *testing.T) {
 			if err != nil {
 				t.Fatalf("test %d: could not read expected output: %v", i, err)
 			}
+
 			have := tt.Output()
 			ok, err := cmpJson(have, want)
+
 			switch {
 			case err != nil:
-				t.Logf(string(have))
+				t.Log(string(have))
 				t.Fatalf("test %d, json parsing failed: %v", i, err)
 			case !ok:
 				t.Fatalf("test %d: output wrong, have \n%v\nwant\n%v\n", i, string(have), string(want))
 			}
 		}
+
 		tt.WaitExit()
+
 		if have, want := tt.ExitStatus(), tc.expExitCode; have != want {
 			t.Fatalf("test %d: wrong exit code, have %d, want %d", i, have, want)
 		}
@@ -470,8 +717,10 @@ func cmpJson(a, b []byte) (bool, error) {
 	if err := json.Unmarshal(a, &j); err != nil {
 		return false, err
 	}
+
 	if err := json.Unmarshal(b, &j2); err != nil {
 		return false, err
 	}
+
 	return reflect.DeepEqual(j2, j), nil
 }

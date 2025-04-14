@@ -51,6 +51,7 @@ func ReadSnapshotRoot(db ethdb.KeyValueReader) common.Hash {
 	if len(data) != common.HashLength {
 		return common.Hash{}
 	}
+
 	return common.BytesToHash(data)
 }
 
@@ -92,20 +93,20 @@ func DeleteAccountSnapshot(db ethdb.KeyValueWriter, hash common.Hash) {
 	}
 }
 
-// ReadStorageSnapshot retrieves the snapshot entry of an storage trie leaf.
+// ReadStorageSnapshot retrieves the snapshot entry of a storage trie leaf.
 func ReadStorageSnapshot(db ethdb.KeyValueReader, accountHash, storageHash common.Hash) []byte {
 	data, _ := db.Get(storageSnapshotKey(accountHash, storageHash))
 	return data
 }
 
-// WriteStorageSnapshot stores the snapshot entry of an storage trie leaf.
+// WriteStorageSnapshot stores the snapshot entry of a storage trie leaf.
 func WriteStorageSnapshot(db ethdb.KeyValueWriter, accountHash, storageHash common.Hash, entry []byte) {
 	if err := db.Put(storageSnapshotKey(accountHash, storageHash), entry); err != nil {
 		log.Crit("Failed to store storage snapshot", "err", err)
 	}
 }
 
-// DeleteStorageSnapshot removes the snapshot entry of an storage trie leaf.
+// DeleteStorageSnapshot removes the snapshot entry of a storage trie leaf.
 func DeleteStorageSnapshot(db ethdb.KeyValueWriter, accountHash, storageHash common.Hash) {
 	if err := db.Delete(storageSnapshotKey(accountHash, storageHash)); err != nil {
 		log.Crit("Failed to delete storage snapshot", "err", err)
@@ -171,10 +172,13 @@ func ReadSnapshotRecoveryNumber(db ethdb.KeyValueReader) *uint64 {
 	if len(data) == 0 {
 		return nil
 	}
+
 	if len(data) != 8 {
 		return nil
 	}
+
 	number := binary.BigEndian.Uint64(data)
+
 	return &number
 }
 
@@ -182,7 +186,9 @@ func ReadSnapshotRecoveryNumber(db ethdb.KeyValueReader) *uint64 {
 // snapshot layer.
 func WriteSnapshotRecoveryNumber(db ethdb.KeyValueWriter, number uint64) {
 	var buf [8]byte
+
 	binary.BigEndian.PutUint64(buf[:], number)
+
 	if err := db.Put(snapshotRecoveryKey, buf[:]); err != nil {
 		log.Crit("Failed to store snapshot recovery number", "err", err)
 	}

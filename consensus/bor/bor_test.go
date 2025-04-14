@@ -4,6 +4,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -14,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/triedb"
 )
 
 func TestGenesisContractChange(t *testing.T) {
@@ -40,27 +42,34 @@ func TestGenesisContractChange(t *testing.T) {
 						"balance": "0x1000",
 					},
 				},
+				"6": map[string]interface{}{
+					addr0.Hex(): map[string]interface{}{
+						"code":    hexutil.Bytes{0x1, 0x4},
+						"balance": "0x2000",
+					},
+				},
 			},
 		},
 	}
 
 	genspec := &core.Genesis{
-		Alloc: map[common.Address]core.GenesisAccount{
+		Alloc: map[common.Address]types.Account{
 			addr0: {
 				Balance: big.NewInt(0),
 				Code:    []byte{0x1, 0x1},
 			},
 		},
+		Config: &params.ChainConfig{},
 	}
 
 	db := rawdb.NewMemoryDatabase()
-	genesis := genspec.MustCommit(db)
 
-	statedb, err := state.New(genesis.Root(), state.NewDatabase(db), nil)
+	genesis := genspec.MustCommit(db, triedb.NewDatabase(db, triedb.HashDefaults))
+
+	statedb, err := state.New(genesis.Root(), state.NewDatabase(triedb.NewDatabase(db, triedb.HashDefaults), nil))
 	require.NoError(t, err)
 
-	config := params.ChainConfig{}
-	chain, err := core.NewBlockChain(db, nil, &config, b, vm.Config{}, nil, nil, nil)
+	chain, err := core.NewBlockChain(rawdb.NewMemoryDatabase(), nil, genspec, nil, b, vm.Config{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	addBlock := func(root common.Hash, num int64) (common.Hash, *state.StateDB) {
@@ -68,14 +77,14 @@ func TestGenesisContractChange(t *testing.T) {
 			ParentHash: root,
 			Number:     big.NewInt(num),
 		}
-		b.Finalize(chain, h, statedb, nil, nil)
+		b.Finalize(chain, h, statedb, &types.Body{Withdrawals: nil, Transactions: nil, Uncles: nil})
 
 		// write state to database
-		root, err := statedb.Commit(false)
+		root, err := statedb.Commit(0, false)
 		require.NoError(t, err)
-		require.NoError(t, statedb.Database().TrieDB().Commit(root, true, nil))
+		require.NoError(t, statedb.Database().TrieDB().Commit(root, true))
 
-		statedb, err := state.New(h.Root, state.NewDatabase(db), nil)
+		statedb, err := state.New(h.Root, state.NewDatabase(triedb.NewDatabase(db, triedb.HashDefaults), nil))
 		require.NoError(t, err)
 
 		return root, statedb
@@ -85,24 +94,35 @@ func TestGenesisContractChange(t *testing.T) {
 
 	root := genesis.Root()
 
-	// code does not change
+	// code does not change, balance remains 0
 	root, statedb = addBlock(root, 1)
 	require.Equal(t, statedb.GetCode(addr0), []byte{0x1, 0x1})
+	require.Equal(t, statedb.GetBalance(addr0), uint256.NewInt(0))
 
-	// code changes 1st time
+	// code changes 1st time, balance remains 0
 	root, statedb = addBlock(root, 2)
 	require.Equal(t, statedb.GetCode(addr0), []byte{0x1, 0x2})
+	require.Equal(t, statedb.GetBalance(addr0), uint256.NewInt(0))
 
-	// code same as 1st change
+	// code same as 1st change, balance remains 0
 	root, statedb = addBlock(root, 3)
 	require.Equal(t, statedb.GetCode(addr0), []byte{0x1, 0x2})
+	require.Equal(t, statedb.GetBalance(addr0), uint256.NewInt(0))
 
-	// code changes 2nd time
-	_, statedb = addBlock(root, 4)
+	// code changes 2nd time, balance updates to 4096
+	root, statedb = addBlock(root, 4)
 	require.Equal(t, statedb.GetCode(addr0), []byte{0x1, 0x3})
+	require.Equal(t, statedb.GetBalance(addr0), uint256.NewInt(4096))
 
-	// make sure balance change DOES NOT take effect
-	require.Equal(t, statedb.GetBalance(addr0), big.NewInt(0))
+	// code same as 2nd change, balance remains 4096
+	root, statedb = addBlock(root, 5)
+	require.Equal(t, statedb.GetCode(addr0), []byte{0x1, 0x3})
+	require.Equal(t, statedb.GetBalance(addr0), uint256.NewInt(4096))
+
+	// code changes 3rd time, balance remains 4096
+	_, statedb = addBlock(root, 6)
+	require.Equal(t, statedb.GetCode(addr0), []byte{0x1, 0x4})
+	require.Equal(t, statedb.GetBalance(addr0), uint256.NewInt(4096))
 }
 
 func TestEncodeSigHeaderJaipur(t *testing.T) {

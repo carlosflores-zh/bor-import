@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-// package web3ext contains geth specific web3.js extensions.
+// Package web3ext contains geth specific web3.js extensions.
 package web3ext
 
 var Modules = map[string]string{
@@ -33,6 +33,7 @@ var Modules = map[string]string{
 
 	// Bor related apis
 	"bor": BorJs,
+	"dev": DevJs,
 }
 
 const CliqueJs = `
@@ -201,6 +202,33 @@ web3._extend({
 			call: 'admin_setMaxPeers',
 			params: 1
 		}),
+		new web3._extend.Method({
+			name: 'getExecutionPoolSize',
+			call: 'admin_getExecutionPoolSize'
+		}),
+		new web3._extend.Method({
+			name: 'getExecutionPoolRequestTimeout',
+			call: 'admin_getExecutionPoolRequestTimeout'
+		}),
+		// new web3._extend.Method({
+		// 	name: 'setWSExecutionPoolRequestTimeout',
+		// 	call: 'admin_setWSExecutionPoolRequestTimeout',
+		// 	params: 1
+		// }),
+		// new web3._extend.Method({
+		// 	name: 'setHttpExecutionPoolRequestTimeout',
+		// 	call: 'admin_setHttpExecutionPoolRequestTimeout',
+		// 	params: 1
+		// }),
+		new web3._extend.Method({
+			name: 'setWSExecutionPoolSize',
+			call: 'admin_setWSExecutionPoolSize',
+			params: 1
+		}),
+		new web3._extend.Method({
+			name: 'setHttpExecutionPoolSize',
+			call: 'admin_setHttpExecutionPoolSize',
+		}),
 	],
 	properties: [
 		new web3._extend.Property({
@@ -236,20 +264,24 @@ web3._extend({
 			outputFormatter: console.log
 		}),
 		new web3._extend.Method({
-			name: 'getHeaderRlp',
-			call: 'debug_getHeaderRlp',
+			name: 'getRawHeader',
+			call: 'debug_getRawHeader',
 			params: 1
 		}),
 		new web3._extend.Method({
-			name: 'getBlockRlp',
-			call: 'debug_getBlockRlp',
+			name: 'getRawBlock',
+			call: 'debug_getRawBlock',
 			params: 1
 		}),
 		new web3._extend.Method({
-			name: 'testSignCliqueBlock',
-			call: 'debug_testSignCliqueBlock',
-			params: 2,
-			inputFormatter: [web3._extend.formatters.inputAddressFormatter, null],
+			name: 'getRawReceipts',
+			call: 'debug_getRawReceipts',
+			params: 1
+		}),
+		new web3._extend.Method({
+			name: 'getRawTransaction',
+			call: 'debug_getRawTransaction',
+			params: 1
 		}),
 		new web3._extend.Method({
 			name: 'setHead',
@@ -270,7 +302,6 @@ web3._extend({
 		new web3._extend.Method({
 			name: 'chaindbProperty',
 			call: 'debug_chaindbProperty',
-			params: 1,
 			outputFormatter: console.log
 		}),
 		new web3._extend.Method({
@@ -484,19 +515,59 @@ web3._extend({
 			inputFormatter:[web3._extend.formatters.inputBlockNumberFormatter, web3._extend.formatters.inputBlockNumberFormatter],
 		}),
 		new web3._extend.Method({
-			name: 'getCheckpointWhitelist',
-			call: 'debug_getCheckpointWhitelist',
+			name: 'getWhitelistedCheckpoint',
+			call: 'debug_getWhitelistedCheckpoint',
 			params: 0,
 		}),
 		new web3._extend.Method({
-			name: 'purgeCheckpointWhitelist',
-			call: 'debug_purgeCheckpointWhitelist',
+			name: 'purgeWhitelistedCheckpoint',
+			call: 'debug_purgeWhitelistedCheckpoint',
+			params: 0,
+		}),  
+		new web3._extend.Method({
+			name: 'getWhitelistedMilestone',
+			call: 'debug_getWhitelistedMilestone',
+			params: 0,
+		}),
+		new web3._extend.Method({
+			name: 'purgeWhitelistedMilestone',
+			call: 'debug_purgeWhitelistedMilestone',
 			params: 0,
 		}),
 		new web3._extend.Method({
 			name: 'getTraceStack',
 			call: 'debug_getTraceStack',
 			params: 0,
+		}),
+		new web3._extend.Method({
+			name: 'dbGet',
+			call: 'debug_dbGet',
+			params: 1
+		}),
+		new web3._extend.Method({
+			name: 'dbAncient',
+			call: 'debug_dbAncient',
+			params: 2
+		}),
+		new web3._extend.Method({
+			name: 'dbAncients',
+			call: 'debug_dbAncients',
+			params: 0
+		}),
+		new web3._extend.Method({
+			name: 'setTrieFlushInterval',
+			call: 'debug_setTrieFlushInterval',
+			params: 1
+		}),
+		new web3._extend.Method({
+			name: 'getTrieFlushInterval',
+			call: 'debug_getTrieFlushInterval',
+			params: 0
+		}),
+		new web3._extend.Method({
+			name: 'peerStats',
+			call: 'debug_peerStats',
+			params: 0
 		}),
 	],
 	properties: []
@@ -538,8 +609,8 @@ web3._extend({
 		new web3._extend.Method({
 			name: 'estimateGas',
 			call: 'eth_estimateGas',
-			params: 2,
-			inputFormatter: [web3._extend.formatters.inputCallFormatter, web3._extend.formatters.inputBlockNumberFormatter],
+			params: 3,
+			inputFormatter: [web3._extend.formatters.inputCallFormatter, web3._extend.formatters.inputBlockNumberFormatter, null],
 			outputFormatter: web3._extend.utils.toDecimal
 		}),
 		new web3._extend.Method({
@@ -613,6 +684,23 @@ web3._extend({
 			call: 'eth_getLogs',
 			params: 1,
 		}),
+		new web3._extend.Method({
+			name: 'call',
+			call: 'eth_call',
+			params: 4,
+			inputFormatter: [web3._extend.formatters.inputCallFormatter, web3._extend.formatters.inputDefaultBlockNumberFormatter, null, null],
+		}),
+		new web3._extend.Method({
+			name: 'simulateV1',
+			call: 'eth_simulateV1',
+			params: 2,
+			inputFormatter: [null, web3._extend.formatters.inputDefaultBlockNumberFormatter],
+		}),
+		new web3._extend.Method({
+			name: 'getBlockReceipts',
+			call: 'eth_getBlockReceipts',
+			params: 1,
+		}),
 	],
 	properties: [
 		new web3._extend.Property({
@@ -641,22 +729,6 @@ web3._extend({
 	property: 'miner',
 	methods: [
 		new web3._extend.Method({
-			name: 'start',
-			call: 'miner_start',
-			params: 1,
-			inputFormatter: [null]
-		}),
-		new web3._extend.Method({
-			name: 'stop',
-			call: 'miner_stop'
-		}),
-		new web3._extend.Method({
-			name: 'setEtherbase',
-			call: 'miner_setEtherbase',
-			params: 1,
-			inputFormatter: [web3._extend.formatters.inputAddressFormatter]
-		}),
-		new web3._extend.Method({
 			name: 'setExtra',
 			call: 'miner_setExtra',
 			params: 1
@@ -672,15 +744,6 @@ web3._extend({
 			call: 'miner_setGasLimit',
 			params: 1,
 			inputFormatter: [web3._extend.utils.fromDecimal]
-		}),
-		new web3._extend.Method({
-			name: 'setRecommitInterval',
-			call: 'miner_setRecommitInterval',
-			params: 1,
-		}),
-		new web3._extend.Method({
-			name: 'getHashrate',
-			call: 'miner_getHashrate'
 		}),
 	],
 	properties: []
@@ -883,5 +946,24 @@ web3._extend({
 			getter: 'vflux_requestStats'
 		}),
 	]
+});
+`
+
+const DevJs = `
+web3._extend({
+	property: 'dev',
+	methods:
+	[
+		new web3._extend.Method({
+			name: 'addWithdrawal',
+			call: 'dev_addWithdrawal',
+			params: 1
+		}),
+		new web3._extend.Method({
+			name: 'setFeeRecipient',
+			call: 'dev_setFeeRecipient',
+			params: 1
+		}),
+	],
 });
 `
